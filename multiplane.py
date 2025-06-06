@@ -311,26 +311,25 @@ class MultiplaneProcess:
 
         return int(slice_start), int(slice_end)
 
-    def get_plane_order(self, stack):
-        return stack
-    
+#     def get_plane_order(self, stack):
+#        return stack
+#    
     def write_calibration(self):        
         #makeFolder(path)
         with open(os.path.join(self.path,'cal.json'), 'w') as yaml_file:
             #yaml.dump(self.cal, yaml_file, default_flow_style=False)
             json.dump(self.cal, yaml_file, cls=NumpyEncoder)
 
-
+    # write the focal planes in which the markers are identified to a tiff file
     def write_marker_planes(self, stack):        
-        #makeFolder(path)
-        for i in range(stack.shape[0]):
-        # Write data to HDF5
-            #with h5py.File(os.path.join(self.path,f'locs_{i}.hd5f'), "w") as data_file:
-            #    data_file.create_dataset(f'locs_{i}.hd5f', data=self.markers[i])
-            fp = self.cal['fp'][i] 
-            tifffile.imwrite(os.path.join(self.cal_path, f'fp_{i}.tiff'), stack[i,fp,...])     
+       for i in range(stack.shape[0]):
+       # Write data to HDF5
+           #with h5py.File(os.path.join(self.path,f'locs_{i}.hd5f'), "w") as data_file:
+           #    data_file.create_dataset(f'locs_{i}.hd5f', data=self.markers[i])
+           fp = self.cal['fp'][i] 
+           tifffile.imwrite(os.path.join(self.cal_path, f'fp_{i}.tiff'), stack[i,fp,...])     
+           print("Finished writing marker planes")
 
-        print("Finished writing marker planes")
 
     def get_files_with_metadata(self):
         for file in os.listdir(self.path):
@@ -632,26 +631,26 @@ class MultiplaneProcess:
 
         return image_crops
 
-    def threshold_segment(self, mip, th):
-        binary = mip > th
-        mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
-        
-
-        #morph = skim.morphology.dilation(mask)
-        # improve segmentation 14/08
-        morph = skim.morphology.dilation(mask)
-        morph = skim.morphology.erosion(mask)
-        morph = skim.morphology.area_opening(morph, area_threshold=32, connectivity=8)
-        if self.log: 
-            plt.imshow(morph)
-            plt.show()
-  
-        #segm = skim.segmentation.clear_border(morph)
-        label_image = skim.measure.label(morph)
-
-        return skim.measure.regionprops(label_image)
-    
-
+#     def threshold_segment(self, mip, th):
+#        binary = mip > th
+#        mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
+#        
+#
+#        #morph = skim.morphology.dilation(mask)
+#        # improve segmentation 14/08
+#        morph = skim.morphology.dilation(mask)
+#        morph = skim.morphology.erosion(mask)
+#        morph = skim.morphology.area_opening(morph, area_threshold=32, connectivity=8)
+#        if self.log: 
+#            plt.imshow(morph)
+#            plt.show()
+#  
+#        #segm = skim.segmentation.clear_border(morph)
+#        label_image = skim.measure.label(morph)
+#
+#        return skim.measure.regionprops(label_image)
+#    
+#
     def adjust_bbox(self, shape, bbox, bbox_size):
         #assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
         #assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
@@ -690,70 +689,70 @@ class MultiplaneProcess:
     def crop_bbox(self, stack, bb):
         return stack[:,bb[0]:bb[2], bb[1]:bb[3]]
 
-    def save_yaml(self, stack, path):
-        for i in range(stack.shape[1]):
-            params = {}
-            filename = os.path.join(path, f'Plane_{i}')
-            params["Plane"] = i
-            params["directory"] = os.path.join(filename, "")
-            self.metadata_files[i] = filename
-            with open(filename + ".yaml", "w") as file:
-                yaml.dump(params, file)
-
-    def save_stack(self, stack):
-        for i in range(stack.shape[0]):
-            tifffile.imwrite(self.metadata_files[i] + ".tiff", stack[i])
-
-    def get_average_transform_via_xcorr(self, stack, fp):
-        # stack: z, t, y, x 
-        # fp: focal planes (int), shape: (z,1)
-        z, t,_,_ = stack.shape
-        transforms = np.empty(shape=(z-1, 2))
-        eval_points = min(t, 5)
-        eval_points_delta  = np.linspace(max(-int(t/2), -20), min(int(t/2), 20), num=min(eval_points, 7), dtype=int)
-        upsample = 100
-        for p in range(z-1): 
-            #eval_plane = int(np.round(np.mean([fp[p], fp[p+1]])))
-            #iterate points in bead stack
-            eval_points_shift = np.empty(shape=(eval_points, 2))
-            for z_point in range(eval_points):
-            # pixel level precision first
-                shift, _,_ = skim.registration.phase_cross_correlation(stack[0,fp[0]+eval_points_delta[z_point],:,:], stack[p+1,fp[p+1]+eval_points_delta[z_point],:,:], upsample_factor=upsample) # evaluate at focal plane
-                eval_points_shift[z_point] = shift/upsample
-            transforms[p] = np.mean(eval_points_shift, axis=0)
-        return transforms
-
-
-    def get_average_transform_via_SIFT(self, stack):
-        # stack: z, t, y, x 
-        # fp: focal planes (int), shape: (z,1)
-        z, t, y, x = stack.shape
-        transforms = np.empty(shape=(z-1, 256))
-        descriptor_extractor = skim.feature.SIFT(upsampling=2, c_dog=0.01, sigma_in=0.1) #BRIEF() # SIFT()
-
-        mips = np.max(stack, axis=1)  # np.empty(shape=(z,y,x))
-        descriptors = {}
-
-        descriptor_extractor.detect_and_extract(mips[0,...])
-        #descriptor_extractor.extract(mips[0,...])
-        #keypoints = descriptor_extractor.keypoints
-        descriptors[0] = descriptor_extractor.descriptors
-
-        for p in range(1, z): 
-
-            #iterate projections for their descriptors and match to first plane
-            descriptor_extractor.detect_and_extract(mips[p,...])
-            #descriptor_extractor.extract(mips[p,...])
-            #keypoints = descriptor_extractor.keypoints
-            descriptors[p] = descriptor_extractor.descriptors
-            
-            m = skim.feature.match_descriptors(descriptors[0], descriptors[p], max_ratio=0.6, cross_check=True) # matching indices in descriptor sets
-            # pixel level precision first
-            transforms[p] = skim.transform.estimate_transform('affine', descriptors[0][m[:,0]], descriptors[p][m[:,1]])
-            
-        return transforms
-
-
+#     def save_yaml(self, stack, path):
+#        for i in range(stack.shape[1]):
+#            params = {}
+#            filename = os.path.join(path, f'Plane_{i}')
+#            params["Plane"] = i
+#            params["directory"] = os.path.join(filename, "")
+#            self.metadata_files[i] = filename
+#            with open(filename + ".yaml", "w") as file:
+#                yaml.dump(params, file)
+#
+#     def save_stack(self, stack):
+#        for i in range(stack.shape[0]):
+#            tifffile.imwrite(self.metadata_files[i] + ".tiff", stack[i])
+#
+#     def get_average_transform_via_xcorr(self, stack, fp):
+#        # stack: z, t, y, x 
+#        # fp: focal planes (int), shape: (z,1)
+#        z, t,_,_ = stack.shape
+#        transforms = np.empty(shape=(z-1, 2))
+#        eval_points = min(t, 5)
+#        eval_points_delta  = np.linspace(max(-int(t/2), -20), min(int(t/2), 20), num=min(eval_points, 7), dtype=int)
+#        upsample = 100
+#        for p in range(z-1): 
+#            #eval_plane = int(np.round(np.mean([fp[p], fp[p+1]])))
+#            #iterate points in bead stack
+#            eval_points_shift = np.empty(shape=(eval_points, 2))
+#            for z_point in range(eval_points):
+#            # pixel level precision first
+#                shift, _,_ = skim.registration.phase_cross_correlation(stack[0,fp[0]+eval_points_delta[z_point],:,:], stack[p+1,fp[p+1]+eval_points_delta[z_point],:,:], upsample_factor=upsample) # evaluate at focal plane
+#                eval_points_shift[z_point] = shift/upsample
+#            transforms[p] = np.mean(eval_points_shift, axis=0)
+#        return transforms
+#
+#
+#     def get_average_transform_via_SIFT(self, stack):
+#        # stack: z, t, y, x 
+#        # fp: focal planes (int), shape: (z,1)
+#        z, t, y, x = stack.shape
+#        transforms = np.empty(shape=(z-1, 256))
+#        descriptor_extractor = skim.feature.SIFT(upsampling=2, c_dog=0.01, sigma_in=0.1) #BRIEF() # SIFT()
+#
+#        mips = np.max(stack, axis=1)  # np.empty(shape=(z,y,x))
+#        descriptors = {}
+#
+#        descriptor_extractor.detect_and_extract(mips[0,...])
+#        #descriptor_extractor.extract(mips[0,...])
+#        #keypoints = descriptor_extractor.keypoints
+#        descriptors[0] = descriptor_extractor.descriptors
+#
+#        for p in range(1, z): 
+#
+#            #iterate projections for their descriptors and match to first plane
+#            descriptor_extractor.detect_and_extract(mips[p,...])
+#            #descriptor_extractor.extract(mips[p,...])
+#            #keypoints = descriptor_extractor.keypoints
+#            descriptors[p] = descriptor_extractor.descriptors
+#            
+#            m = skim.feature.match_descriptors(descriptors[0], descriptors[p], max_ratio=0.6, cross_check=True) # matching indices in descriptor sets
+#            # pixel level precision first
+#            transforms[p] = skim.transform.estimate_transform('affine', descriptors[0][m[:,0]], descriptors[p][m[:,1]])
+#            
+#        return transforms
+#
+#
     def transform_stack(self, stack, transform):
         # stack: z, t, y, x 
         # transform:  (z,2) (xy shift vector)
@@ -764,17 +763,17 @@ class MultiplaneProcess:
             outer.update(1)
         return stack
 
-    def shift_via_fft(self, stack, transform):
-        # stack: t, y, x
-        # transform: (x,y)
-        t, _, _ = stack.shape
-        inner = tqdm(total=t, desc='timepoint', position=0)
-        for img in range(t):
-            transformed_img = scp.ndimage.fourier_shift(input=np.fft.fftn(stack[img,:,:]), shift=transform)
-            stack[img,:,:] = np.fft.ifftn(transformed_img)
-            inner.update(1)
-        return stack
-
+#     def shift_via_fft(self, stack, transform):
+#        # stack: t, y, x
+#        # transform: (x,y)
+#        t, _, _ = stack.shape
+#        inner = tqdm(total=t, desc='timepoint', position=0)
+#        for img in range(t):
+#            transformed_img = scp.ndimage.fourier_shift(input=np.fft.fftn(stack[img,:,:]), shift=transform)
+#            stack[img,:,:] = np.fft.ifftn(transformed_img)
+#            inner.update(1)
+#        return stack
+#
     def estimate_interplane_distance(self, stack):
         from multiplane_calibration import MultiplaneCalibration
         cal = MultiplaneCalibration()
@@ -796,8 +795,8 @@ class MultiplaneProcess:
         makeFolder(outpath)
         f[0].savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
         print(f"Finished writing {output_name}")
-
-
+#
+#
     def apply_brightness_correction(self, image):
         for p in range(image.shape[0]):
             image[p,...] = np.divide(image[p,...], self.cal['brightness'][p])
@@ -883,23 +882,23 @@ class MultiplaneProcess:
 #########################################
 
 
-    def calibrate_sml(self):
-        from smlm_calibration import smlm_calibration
-        if self.mcal is None:
-            markers = None
-        else:
-            markers = self.mcal.markers
-            
-        self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
-        cal = self.smlcal.biplane_calibration()
-        cal['fp'] = [0.0] + [np.sum(self.cal['dz'][:p+1]) for p in range(len(self.cal['dz']))]
-        cal_outer = {"zcal": cal}
-        outname = os.path.join(self.path, "zcal.mat")
-        scp.io.savemat(outname, cal_outer)
-
-        return cal_outer
-
-
+#     def calibrate_sml(self):
+#        from smlm_calibration import smlm_calibration
+#        if self.mcal is None:
+#            markers = None
+#        else:
+#            markers = self.mcal.markers
+#            
+#        self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
+#        cal = self.smlcal.biplane_calibration()
+#        cal['fp'] = [0.0] + [np.sum(self.cal['dz'][:p+1]) for p in range(len(self.cal['dz']))]
+#        cal_outer = {"zcal": cal}
+#        outname = os.path.join(self.path, "zcal.mat")
+#        scp.io.savemat(outname, cal_outer)
+#
+#        return cal_outer
+#
+#
 #########################################
 #TRANFORMS
 #########################################
@@ -989,55 +988,55 @@ def jsonKeys2int(x):
     return x
 
 
-def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
-    """
-    Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
-    
-    :param folder_path: Path to the folder containing TIFF files.
-    :param batch_size: Number of frames to read in each batch.
-    :param n_cams: Number of channels (e.g., cameras) for each frame.
-    :param file_extension: File extension for TIFF files, default is 'tif'.
-    :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
-    """
-    # Get all TIFF files in the folder
-    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-    
-    current_batch = []  # To store images for the current batch
-    
-    # Iterate through each TIFF file
-    for tiff_file in tiff_files:
-        with tifffile.TiffFile(tiff_file) as tif:
-            total_pages = len(tif.pages)
-            
-            # Iterate through pages of the current TIFF file
-            for i in range(total_pages):
-                try:
-                    # Read the current page as a NumPy array (skip reading metadata)
-                    image = tif.pages[i].asarray()
-                    current_batch.append(image)
-                except UnicodeDecodeError:
-                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
-
-                # If the batch size is reached, process and yield the batch
-                if len(current_batch) == batch_size * n_cams:
-                    # Reshape into 4D array: (batch_size, n_cams, height, width)
-                    batch_array = np.array(current_batch)
-                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
-                    yield batch_array
-                    current_batch = []  # Reset the batch after yielding
-        
-    # If there are remaining images after all files are processed, yield them as a batch
-    if current_batch:
-        remaining_size = len(current_batch) // n_cams
-
-        try: 
-            batch_array = np.array(current_batch)
-            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-        except ValueError:
-            *batch_array, _ = batch_array
-            batch_array = np.array(current_batch)
-            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-        
-        yield batch_array
-
+# def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
+#    """
+#    Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
+#    
+#    :param folder_path: Path to the folder containing TIFF files.
+#    :param batch_size: Number of frames to read in each batch.
+#    :param n_cams: Number of channels (e.g., cameras) for each frame.
+#    :param file_extension: File extension for TIFF files, default is 'tif'.
+#    :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
+#    """
+#    # Get all TIFF files in the folder
+#    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+#    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+#    
+#    current_batch = []  # To store images for the current batch
+#    
+#    # Iterate through each TIFF file
+#    for tiff_file in tiff_files:
+#        with tifffile.TiffFile(tiff_file) as tif:
+#            total_pages = len(tif.pages)
+#            
+#            # Iterate through pages of the current TIFF file
+#            for i in range(total_pages):
+#                try:
+#                    # Read the current page as a NumPy array (skip reading metadata)
+#                    image = tif.pages[i].asarray()
+#                    current_batch.append(image)
+#                except UnicodeDecodeError:
+#                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
+#
+#                # If the batch size is reached, process and yield the batch
+#                if len(current_batch) == batch_size * n_cams:
+#                    # Reshape into 4D array: (batch_size, n_cams, height, width)
+#                    batch_array = np.array(current_batch)
+#                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
+#                    yield batch_array
+#                    current_batch = []  # Reset the batch after yielding
+#        
+#    # If there are remaining images after all files are processed, yield them as a batch
+#    if current_batch:
+#        remaining_size = len(current_batch) // n_cams
+#
+#        try: 
+#            batch_array = np.array(current_batch)
+#            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+#        except ValueError:
+#            *batch_array, _ = batch_array
+#            batch_array = np.array(current_batch)
+#            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+#        
+#        yield batch_array
+#

@@ -95,11 +95,11 @@ class MultiplaneCalibration:
                     'max_neighbours' : 5} #distance tree neighbours, was == 10
 
 
-    def setlog(self, log=bool):
-        self.log = log
-        return self
-
-
+#     def setlog(self, log=bool):
+#        self.log = log
+#        return self
+#
+#
     def estimate_interplane_distance(self, stack):
         print('Estimating interplane distance..')
         planes = stack.shape[0]
@@ -276,47 +276,47 @@ class MultiplaneCalibration:
         return pos_sr
 
 
-    def track_locs_in_z_all(self, pos_sr):
-        # assuming there is only one or less corresponding loc per frame in z
-        beads = {}
-        bidx = 0 # bead_idx 
-        run = True
-        z_loop = 0
-        max_frames = self.pp['planes']
-        #pos_sr = self.pos_sr.copy()
-        while run:
-            
-            # search for new bead position in current z_loop 
-            loc = next((l for l in pos_sr if l[2] == z_loop), None)
-            if loc is None:
-                if z_loop != max_frames:
-                    z_loop += 1
-                else:     
-                    run = False
-                    break
-
-            else:
-                # if unaccounted localisation exist, assign to a new bead and iterate through the stack to find its corresponding z-positions
-                beads[bidx] = [loc]
-                pos_sr = delete_loc(pos_sr, loc) 
-                #np.delete(pos_sr, loc, axis=0)
-                
-                for z in range(z_loop+1, max_frames):
-                    next_frame = pos_sr[pos_sr[:,2]==z]
-                    next_point = self.find_closest_neighbour_in_next_frame(beads[bidx][-1][:2], next_frame)
-                    if next_point is None:
-                        #beads[bidx].append(np.zeros(4))
-                        beads[bidx].append(['None', 'None', z, 'None'])
-                    else:
-                        beads[bidx].append(next_point)
-                        # remove loc from original loc array 
-                        pos_sr = delete_loc(pos_sr, next_point)
-
-                bidx += 1 # update bead idx after loop through stack for new assigment 
-        
-        return beads
-    
-
+#     def track_locs_in_z_all(self, pos_sr):
+#        # assuming there is only one or less corresponding loc per frame in z
+#        beads = {}
+#        bidx = 0 # bead_idx 
+#        run = True
+#        z_loop = 0
+#        max_frames = self.pp['planes']
+#        #pos_sr = self.pos_sr.copy()
+#        while run:
+#            
+#            # search for new bead position in current z_loop 
+#            loc = next((l for l in pos_sr if l[2] == z_loop), None)
+#            if loc is None:
+#                if z_loop != max_frames:
+#                    z_loop += 1
+#                else:     
+#                    run = False
+#                    break
+#
+#            else:
+#                # if unaccounted localisation exist, assign to a new bead and iterate through the stack to find its corresponding z-positions
+#                beads[bidx] = [loc]
+#                pos_sr = delete_loc(pos_sr, loc) 
+#                #np.delete(pos_sr, loc, axis=0)
+#                
+#                for z in range(z_loop+1, max_frames):
+#                    next_frame = pos_sr[pos_sr[:,2]==z]
+#                    next_point = self.find_closest_neighbour_in_next_frame(beads[bidx][-1][:2], next_frame)
+#                    if next_point is None:
+#                        #beads[bidx].append(np.zeros(4))
+#                        beads[bidx].append(['None', 'None', z, 'None'])
+#                    else:
+#                        beads[bidx].append(next_point)
+#                        # remove loc from original loc array 
+#                        pos_sr = delete_loc(pos_sr, next_point)
+#
+#                bidx += 1 # update bead idx after loop through stack for new assigment 
+#        
+#        return beads
+#    
+#
     def track_locs_in_z(self, pos_sr, bead_pos):
         # assuming there is only one or less corresponding loc per frame in z
         tracks = {}
@@ -514,33 +514,33 @@ class MultiplaneCalibration:
     
 
 
-    def get_transformation(self, stack, refplane):
-        # determine affine transformation between planes
-        planes = self.pp['planes']
-        self.refplane = refplane
-        
-        # if markers are empty, find them first
-        outer = tqdm(total=planes, desc='Finding markers', position=0)
-
-        for p in range(planes):
-            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
-            outer.update(1)
-
-        # calculate tranformation
-        outer = tqdm(total=planes, desc='Calculating transform')
-        transform_error = {}
-        for p in range(planes):
-            self.transform[p], self.markers[p], transform_error[p] = self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
-            outer.update(1)
-
-            self.transform_error[p] = {}
-            self.transform_error[p]['mean'] = np.mean(transform_error[p])
-            self.transform_error[p]['std'] = np.std(transform_error[p])
-            self.transform_error[p]['marker_count'] = len(transform_error[p])
-            print(f"Plane {p}: Pixel2pixel_error: {self.transform_error[p]['mean']:.4f} +-: {self.transform_error[p]['std']:.4f}, with Pixel2pixel_error: {self.transform_error[p]['marker_count']} markers")
-
-        return self.transform, self.transform_error, self.markers
-
+#     def get_transformation(self, stack, refplane):
+#        # determine affine transformation between planes
+#        planes = self.pp['planes']
+#        self.refplane = refplane
+#        
+#        # if markers are empty, find them first
+#        outer = tqdm(total=planes, desc='Finding markers', position=0)
+#
+#        for p in range(planes):
+#            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
+#            outer.update(1)
+#
+#        # calculate tranformation
+#        outer = tqdm(total=planes, desc='Calculating transform')
+#        transform_error = {}
+#        for p in range(planes):
+#            self.transform[p], self.markers[p], transform_error[p] = self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
+#            outer.update(1)
+#
+#            self.transform_error[p] = {}
+#            self.transform_error[p]['mean'] = np.mean(transform_error[p])
+#            self.transform_error[p]['std'] = np.std(transform_error[p])
+#            self.transform_error[p]['marker_count'] = len(transform_error[p])
+#            print(f"Plane {p}: Pixel2pixel_error: {self.transform_error[p]['mean']:.4f} +-: {self.transform_error[p]['std']:.4f}, with Pixel2pixel_error: {self.transform_error[p]['marker_count']} markers")
+#
+#        return self.transform, self.transform_error, self.markers
+#
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
         #matches = feature.match_descriptors(ref, tar, max_distance=20, cross_check=True) 
@@ -635,31 +635,31 @@ class MultiplaneCalibration:
         
         return transformed_points
     
-    def remove_outliers(self, data, lower_percentile=5, upper_percentile=95):
-        """
-        Removes outliers from a 2D array using percentile-based filtering.
-        
-        Parameters:
-        - data (np.ndarray): A 2D numpy array of numerical values.
-        - lower_percentile (float): The lower percentile threshold. Values below this percentile will be considered outliers.
-        - upper_percentile (float): The upper percentile threshold. Values above this percentile will be considered outliers.
-        
-        Returns:
-        - np.ndarray: A 2D numpy array with outliers removed.
-        """
-        mask = np.ones(data.shape[0], dtype=bool)
-        for i in range(data.shape[1]):
-            # Calculate the specified percentiles
-            lower_bound = np.percentile(data[:,i], lower_percentile)
-            upper_bound = np.percentile(data[:,i], upper_percentile)
-            
-            # Create a mask for values within the bounds
-            mask = mask & (data[:,i] >= lower_bound) & (data[:,i] <= upper_bound)
-        # Set outliers to NaN or remove them (depending on your needs)
-        cleaned_data = data[mask,:]  # Use np.nan for missing data representation
-        return cleaned_data  # Returning both for flexibility
-
-
+#     def remove_outliers(self, data, lower_percentile=5, upper_percentile=95):
+#        """
+#        Removes outliers from a 2D array using percentile-based filtering.
+#        
+#        Parameters:
+#        - data (np.ndarray): A 2D numpy array of numerical values.
+#        - lower_percentile (float): The lower percentile threshold. Values below this percentile will be considered outliers.
+#        - upper_percentile (float): The upper percentile threshold. Values above this percentile will be considered outliers.
+#        
+#        Returns:
+#        - np.ndarray: A 2D numpy array with outliers removed.
+#        """
+#        mask = np.ones(data.shape[0], dtype=bool)
+#        for i in range(data.shape[1]):
+#            # Calculate the specified percentiles
+#            lower_bound = np.percentile(data[:,i], lower_percentile)
+#            upper_bound = np.percentile(data[:,i], upper_percentile)
+#            
+#            # Create a mask for values within the bounds
+#            mask = mask & (data[:,i] >= lower_bound) & (data[:,i] <= upper_bound)
+#        # Set outliers to NaN or remove them (depending on your needs)
+#        cleaned_data = data[mask,:]  # Use np.nan for missing data representation
+#        return cleaned_data  # Returning both for flexibility
+#
+#
     def find_markers(self, stack, id, plane=None):
         # localise candidates from MIP stack
         assert len(stack.shape)==3, "stack has wrong dimensions"
@@ -694,26 +694,26 @@ class MultiplaneCalibration:
         return pos_sr
     
 
-    def display_transformations(self):
-        # Create a simple grid
-        x = np.linspace(0, 100, 26)
-        y = np.linspace(0, 100, 26)
-        grid_x, grid_y = np.meshgrid(x, y)
-        grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
-        
-        # Plot the original and transformed grids
-        fig, axs = plt.subplots(1, len(self.transform.keys())+1, figsize=(15, 10))
-
-        plot_grid(axs[0], grid_points, 'default')
-
-        for ax, (name, matrix) in zip(axs[1:], self.transform.items()):
-            transformed_points = apply_display_affine_transform(matrix, grid_points)
-            plot_grid(ax, transformed_points, name)
-
-        plt.tight_layout()
-        plt.show()
-
-
+#     def display_transformations(self):
+#        # Create a simple grid
+#        x = np.linspace(0, 100, 26)
+#        y = np.linspace(0, 100, 26)
+#        grid_x, grid_y = np.meshgrid(x, y)
+#        grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
+#        
+#        # Plot the original and transformed grids
+#        fig, axs = plt.subplots(1, len(self.transform.keys())+1, figsize=(15, 10))
+#
+#        plot_grid(axs[0], grid_points, 'default')
+#
+#        for ax, (name, matrix) in zip(axs[1:], self.transform.items()):
+#            transformed_points = apply_display_affine_transform(matrix, grid_points)
+#            plot_grid(ax, transformed_points, name)
+#
+#        plt.tight_layout()
+#        plt.show()
+#
+#
     '''
     def pre_translate_markers(self, ref, tar):
         # Calculate the centroids of ref and tar
@@ -739,19 +739,19 @@ class MultiplaneCalibration:
     
 
 
-    def estimate_dxy(self, tracks):
-        # estimate the displacement along z per bead in a dict of beads
-        # tracks: dict(bead_1, bead_2, bead_3)
-        # bead_n: array([x1,y1,z1,brightness1;
-        #                x2, y2, z2, brightness2])
-        dxy = {}
-        for k in tracks.shape[0]:
-   
-            # interpolate missing z values
-            dxy[k][0] = tracks[k][:,0]
-            #cleaned_tracks[k] = tracks[k]
-        return
-
+#     def estimate_dxy(self, tracks):
+#        # estimate the displacement along z per bead in a dict of beads
+#        # tracks: dict(bead_1, bead_2, bead_3)
+#        # bead_n: array([x1,y1,z1,brightness1;
+#        #                x2, y2, z2, brightness2])
+#        dxy = {}
+#        for k in tracks.shape[0]:
+#   
+#            # interpolate missing z values
+#            dxy[k][0] = tracks[k][:,0]
+#            #cleaned_tracks[k] = tracks[k]
+#        return
+#
     '''
 #############################################
 # new quad based method, just sample all quad based transforms, then take the best
@@ -855,63 +855,63 @@ class MultiplaneCalibration:
 ######################################################
 
 
-    def get_micrometry_transformation(self, stack, refplane):
-        # calculate affine transform via babcock code base  
-        if self.log:
-            print('Using babcock quad based transformation estimation')
-        # determine affine transformation between planes
-        planes = self.pp['planes']
-        
-        # if markers are empty, find them first
-        outer = tqdm(total=planes, desc='Finding markers', position=0)
-        for p in range(planes):
-            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
-            outer.update(1)
-
-        outer = tqdm(total=planes, desc='Creating quads')
-        # create tree and quad from loc positions
-        for p in range(planes):
-            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
-                                            y = self.markers[p][:,1],
-                                            min_size = self.pp['min_size'],
-                                            max_size = self.pp['max_size'],
-                                            max_neighbors = self.pp['max_neighbours'])
-            self.kd[p] = kd
-            self.quad[p] = quad
-            outer.update(1)
-
-        # calculate tranformation
-        outer = tqdm(total=planes, desc='Calculating transform')
-        transform_error_estimate = {}
-        for p in range(planes):
-            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
-                                                                                    other_quad = self.quad[p],
-                                                                                    ref_kd=self.kd[refplane],
-                                                                                    other_kd=self.kd[p])
-            outer.update(1)
-
-            if (transform_error_estimate[p] > 10.0):
-                plotMatch(self.kd[refplane],
-                        self.kd[p],
-                        self.transform[p],
-                        #save_as = f"transform_ref{refplane}_other{p}.png",
-                        show = self.log)
-
-        if self.check_magnification:
-            outer = tqdm(total=planes, desc='Creating quads')
-            # create tree and quad from loc positions
-            for p in range(planes):
-                if self.quad_match[p]['ref'] is None:
-                    self.scaling_factor[p] = None
-                    print(f'Skipping magnification check for plane {p}, no valid points found.')
-                else:
-                    self.scaling_factor[p] = self.compute_scaling_factor(self.quad_match[p]['ref'], 
-                                                            self.quad_match[p]['other'] )
-                
-                
-            
-        return self.transform, self.transform_error, self.markers, self.scaling_factor
-    
+#     def get_micrometry_transformation(self, stack, refplane):
+#        # calculate affine transform via babcock code base  
+#        if self.log:
+#            print('Using babcock quad based transformation estimation')
+#        # determine affine transformation between planes
+#        planes = self.pp['planes']
+#        
+#        # if markers are empty, find them first
+#        outer = tqdm(total=planes, desc='Finding markers', position=0)
+#        for p in range(planes):
+#            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
+#            outer.update(1)
+#
+#        outer = tqdm(total=planes, desc='Creating quads')
+#        # create tree and quad from loc positions
+#        for p in range(planes):
+#            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
+#                                            y = self.markers[p][:,1],
+#                                            min_size = self.pp['min_size'],
+#                                            max_size = self.pp['max_size'],
+#                                            max_neighbors = self.pp['max_neighbours'])
+#            self.kd[p] = kd
+#            self.quad[p] = quad
+#            outer.update(1)
+#
+#        # calculate tranformation
+#        outer = tqdm(total=planes, desc='Calculating transform')
+#        transform_error_estimate = {}
+#        for p in range(planes):
+#            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
+#                                                                                    other_quad = self.quad[p],
+#                                                                                    ref_kd=self.kd[refplane],
+#                                                                                    other_kd=self.kd[p])
+#            outer.update(1)
+#
+#            if (transform_error_estimate[p] > 10.0):
+#                plotMatch(self.kd[refplane],
+#                        self.kd[p],
+#                        self.transform[p],
+#                        #save_as = f"transform_ref{refplane}_other{p}.png",
+#                        show = self.log)
+#
+#        if self.check_magnification:
+#            outer = tqdm(total=planes, desc='Creating quads')
+#            # create tree and quad from loc positions
+#            for p in range(planes):
+#                if self.quad_match[p]['ref'] is None:
+#                    self.scaling_factor[p] = None
+#                    print(f'Skipping magnification check for plane {p}, no valid points found.')
+#                else:
+#                    self.scaling_factor[p] = self.compute_scaling_factor(self.quad_match[p]['ref'], 
+#                                                            self.quad_match[p]['other'] )
+#                
+#                
+#            
+#        return self.transform, self.transform_error, self.markers, self.scaling_factor
+#    
     def compute_scaling_factor(self, points_ref, points_other):
         '''
         If image has a different magnification, relative distances between markers should remain consistent
@@ -934,15 +934,15 @@ class MultiplaneCalibration:
 
 
     def compute_distance_matrix(self, points):
-        n = points.shape[0]
-        dist_matrix = np.zeros((n, n))
-        for i in range(n):
-            for j in range(n):
-                dist_matrix[i, j] = np.linalg.norm(points[i] - points[j])
-        return dist_matrix
+       n = points.shape[0]
+       dist_matrix = np.zeros((n, n))
+       for i in range(n):
+           for j in range(n):
+               dist_matrix[i, j] = np.linalg.norm(points[i] - points[j])
+       return dist_matrix
 
     def normalize_matrix(self, matrix):
-        return matrix / np.max(matrix)
+       return matrix / np.max(matrix)
 
 ################################################################################
 # Micrometry babcock
@@ -1017,22 +1017,22 @@ def applyTransform(kd, transform):
     return [x, y]
 
 
-def fgProbability(kd1, kd2, transform, bg_p):
-    """
-    Returns an estimate of how likely the transform is correct.
-    """
-    # Transform 'other' coordinates into the 'reference' frame.
-    [x2, y2] = applyTransform(kd2, transform)
-    p2 = np.stack((x2, y2), axis = -1)
-
-    # Calculate distance to nearest point in 'reference'.
-    [dist, index] = kd1.query(p2)
-
-    # Score assuming a localization accuracy of 1 pixel.
-    fg_p = bg_p + (1.0 - bg_p) * np.sum(np.exp(-dist*dist*0.5))/float(x2.size)
-    return fg_p
-
-    
+# def fgProbability(kd1, kd2, transform, bg_p):
+#    """
+#    Returns an estimate of how likely the transform is correct.
+#    """
+#    # Transform 'other' coordinates into the 'reference' frame.
+#    [x2, y2] = applyTransform(kd2, transform)
+#    p2 = np.stack((x2, y2), axis = -1)
+#
+#    # Calculate distance to nearest point in 'reference'.
+#    [dist, index] = kd1.query(p2)
+#
+#    # Score assuming a localization accuracy of 1 pixel.
+#    fg_p = bg_p + (1.0 - bg_p) * np.sum(np.exp(-dist*dist*0.5))/float(x2.size)
+#    return fg_p
+#
+#    
 def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = None):
     """
     Make a KD tree and a list of quads from x, y points.
@@ -1045,40 +1045,40 @@ def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = Non
     return [kd, m_quads]
 
 
-def plotMatch(kd1, kd2, transform, save_as = None, show = True):
-    [x2, y2] = applyTransform(kd2, transform)
-    
-    fig = plt.figure()
-    plt.scatter(kd1.data[:,0], kd1.data[:,1], facecolors = 'none', edgecolors = 'red', s = 100)
-    plt.scatter(x2, y2, color = 'green', marker = '+', s = 100)
-
-    legend = plt.legend(('reference', 'other'), loc=1)
-    plt.xlabel("pixels")
-    plt.ylabel("pixels")
-
-    ax = plt.gca()
-    ax.set_aspect('equal')
-
-    if save_as is not None:
-        fig.savefig(save_as)
-    
-    if show:
-        plt.show()
-
-
-def prettyPrintTransform(transform):
-    """
-    Pretty print the transform.
-    """
-    print("Reference to other transform:")
-    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[2][0], transform[2][1], transform[2][2]))
-    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[3][0], transform[3][1], transform[3][2]))
-    print("")
-    print("Other to reference transform:")
-    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[0][0], transform[0][1], transform[0][2]))
-    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[1][0], transform[1][1], transform[1][2]))
-    print("")
-
+# def plotMatch(kd1, kd2, transform, save_as = None, show = True):
+#    [x2, y2] = applyTransform(kd2, transform)
+#    
+#    fig = plt.figure()
+#    plt.scatter(kd1.data[:,0], kd1.data[:,1], facecolors = 'none', edgecolors = 'red', s = 100)
+#    plt.scatter(x2, y2, color = 'green', marker = '+', s = 100)
+#
+#    legend = plt.legend(('reference', 'other'), loc=1)
+#    plt.xlabel("pixels")
+#    plt.ylabel("pixels")
+#
+#    ax = plt.gca()
+#    ax.set_aspect('equal')
+#
+#    if save_as is not None:
+#        fig.savefig(save_as)
+#    
+#    if show:
+#        plt.show()
+#
+#
+# def prettyPrintTransform(transform):
+#    """
+#    Pretty print the transform.
+#    """
+#    print("Reference to other transform:")
+#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[2][0], transform[2][1], transform[2][2]))
+#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[3][0], transform[3][1], transform[3][2]))
+#    print("")
+#    print("Other to reference transform:")
+#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[0][0], transform[0][1], transform[0][2]))
+#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[1][0], transform[1][1], transform[1][2]))
+#    print("")
+#
 ################################################################################
 # END CLASS
 ################################################################################
@@ -1151,72 +1151,72 @@ def approx_interp2(val,w):
 #S. Preus, L.L. Hildebrandt, and V. Birkedal, Biophys. J. 111, 1278 (2016).
 #Also see Figure S11 in doi.org/10.1063/1.5005899 (Martens et al., 2017)
 
-def photometry_intensity(ROI):
-  #First we create emtpy signal and background maps with the same shape as
-  #the ROI.
-  SignalMap = np.zeros(ROI.shape)
-  BackgroundMap = np.zeros(ROI.shape)
-  #Next we determine the ROI radius from the data
-  ROIradius = (ROI.shape[0]-1)/2
-
-  #Now we attribute every pixel in the signal and background maps to be
-  #belonging either to signal or background based on the distance to the
-  #center
-  #For this, we loop over the x and y positions
-  for xx in range(0,ROI.shape[0]):
-    for yy in range(0,ROI.shape[1]):
-      #Now we calculate Pythagoras' distance from this pixel to the center
-      distToCenter = np.sqrt((xx-ROI.shape[0]/2+.5)**2 + (yy-ROI.shape[1]/2+.5)**2)
-      #And we populate either SignalMap or BackgroundMap based on this distance
-      if distToCenter <= (ROIradius): #This is signal for sure
-        SignalMap[xx,yy] = 1
-      elif distToCenter > (ROIradius-0.5): #This is background
-        BackgroundMap[xx,yy] = 1
-
-  #Now we take the 56th percentile of the data in the background map.
-  #This is a valid measure for the expected background intensity
-
-  #First we use the BackgroundMap as a mask for the intensity data, and use
-  #that to get a list of Background Intensities.
-  BackgroundIntensityList = np.ma.masked_array(ROI, mask=BackgroundMap).flatten()
-  #And then we take the 56th percentile (or the value closest to it)
-  if len(BackgroundIntensityList) > 0:
-    BackgroundIntensity = np.percentile(BackgroundIntensityList,56)
-  else:
-    BackgroundIntensity = 0
-
-  #To then assess the intensity, we simply sum the entire ROI in the SignalMap
-  #and subtract the BackgroundIntensity for every pixel
-  SignalIntensity = sum((ROI*SignalMap).flatten())
-  SignalIntensity -= BackgroundIntensity*sum(SignalMap.flatten())
-
-  #And we let the function return the SignalIntensity
-  return max(0,SignalIntensity)
-
-
-
+# def photometry_intensity(ROI):
+#  #First we create emtpy signal and background maps with the same shape as
+#  #the ROI.
+#  SignalMap = np.zeros(ROI.shape)
+#  BackgroundMap = np.zeros(ROI.shape)
+#  #Next we determine the ROI radius from the data
+#  ROIradius = (ROI.shape[0]-1)/2
+#
+#  #Now we attribute every pixel in the signal and background maps to be
+#  #belonging either to signal or background based on the distance to the
+#  #center
+#  #For this, we loop over the x and y positions
+#  for xx in range(0,ROI.shape[0]):
+#    for yy in range(0,ROI.shape[1]):
+#      #Now we calculate Pythagoras' distance from this pixel to the center
+#      distToCenter = np.sqrt((xx-ROI.shape[0]/2+.5)**2 + (yy-ROI.shape[1]/2+.5)**2)
+#      #And we populate either SignalMap or BackgroundMap based on this distance
+#      if distToCenter <= (ROIradius): #This is signal for sure
+#        SignalMap[xx,yy] = 1
+#      elif distToCenter > (ROIradius-0.5): #This is background
+#        BackgroundMap[xx,yy] = 1
+#
+#  #Now we take the 56th percentile of the data in the background map.
+#  #This is a valid measure for the expected background intensity
+#
+#  #First we use the BackgroundMap as a mask for the intensity data, and use
+#  #that to get a list of Background Intensities.
+#  BackgroundIntensityList = np.ma.masked_array(ROI, mask=BackgroundMap).flatten()
+#  #And then we take the 56th percentile (or the value closest to it)
+#  if len(BackgroundIntensityList) > 0:
+#    BackgroundIntensity = np.percentile(BackgroundIntensityList,56)
+#  else:
+#    BackgroundIntensity = 0
+#
+#  #To then assess the intensity, we simply sum the entire ROI in the SignalMap
+#  #and subtract the BackgroundIntensity for every pixel
+#  SignalIntensity = sum((ROI*SignalMap).flatten())
+#  SignalIntensity -= BackgroundIntensity*sum(SignalMap.flatten())
+#
+#  #And we let the function return the SignalIntensity
+#  return max(0,SignalIntensity)
+#
+#
+#
 def delete_loc(matrix, loc_to_delete):
     # Find the index of the row to delete
     index = np.where((matrix == loc_to_delete).all(axis=1))[0][0]
     # Delete the row using np.delete
     matrix = np.delete(matrix, index, axis=0)
     return matrix
-
-
+#
+#
 def gaussian(x, amp, mean, stddev, offset):
     return amp * np.exp(-((x - mean) ** 2) / (2 * stddev ** 2)) + offset
 
 # Function to plot the original and transformed grid
-def plot_grid(ax, points, title, color='b'):
-    #ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=3)
-    ax.scatter(points[:, 0], points[:, 1], s=3, c=color, marker='o')
-    ax.set_title(title)
-    #ax.set_xlim(-2, 10)
-    #ax.set_ylim(-2, 10)
-    ax.grid(True)
-    ax.set_aspect('equal')
-
-
-def apply_display_affine_transform(matrix, points):
-    transformed_points = np.dot(matrix[:, :2], points.T).T + matrix[:, 2]
-    return transformed_points
+# def plot_grid(ax, points, title, color='b'):
+#    #ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=3)
+#    ax.scatter(points[:, 0], points[:, 1], s=3, c=color, marker='o')
+#    ax.set_title(title)
+#    #ax.set_xlim(-2, 10)
+#    #ax.set_ylim(-2, 10)
+#    ax.grid(True)
+#    ax.set_aspect('equal')
+#
+#
+# def apply_display_affine_transform(matrix, points):
+#    transformed_points = np.dot(matrix[:, :2], points.T).T + matrix[:, 2]
+#    return transformed_points
