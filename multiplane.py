@@ -70,6 +70,7 @@ class MultiplaneProcess:
         self.meta = {}
         self.cal = {}
         self.is_bead = False
+        self.i_corr = True
         self.save_individual = False
         self.deskew_cam = True
         self.mcal = None # multiplane calibration instance
@@ -109,17 +110,13 @@ class MultiplaneProcess:
         else:
             fopen = os.path.join(self.path, 'cal.json')
 
-
-        #try: 
         f = open(fopen)
         self.cal = json.load(f, object_hook=jsonKeys2int) 
-        #except:
-        #    print("Something went wrong with loading the calibration file, skipping the process") 
-
         self.check_calibration() 
 
         return self.cal
         
+
     def check_calibration(self):
         # check if calibration file contains all relevant information 
         if type(self.cal) is not dict: 
@@ -145,8 +142,10 @@ class MultiplaneProcess:
 
 
     def load_data(self):
+        # load image data with standard tiffile reader
         return tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
     
+
     def create_cal_path(self):
         self.cal_path = os.path.join(self.path, 'cal_data')
         makeFolder(self.cal_path)
@@ -154,13 +153,13 @@ class MultiplaneProcess:
     def create_out_path(self):
         self.output_path = os.path.join(self.path, 'reg')
         makeFolder(self.output_path)
-        
-                                
+             
 
-    def calibrate(self, is_bead = False): 
+    def calibrate(self, is_bead = False, i_corr = True): 
         # do calibration on path data (if no bead data) 
         # if not is_bead: is only approximation but better than nothing
         self.is_bead = is_bead
+        self.i_corr = i_corr
         # load first dataset (4gb chunk)
         
         # check whether filelist has been filled 
@@ -202,28 +201,33 @@ class MultiplaneProcess:
         else: 
             self.cal['order'] = self.P['order_default'] 
             self.cal['dz'] = self.P['dz']
-            
-
+        
         print(f"Using order {self.cal['order']}")
         fps = np.ones(N_img[0])*(N_img[1]/2)
         fps = fps.astype(np.uint16)
 
-
         if 'brightness' not in self.cal.keys():
             self.cal['brightness'] = self.estimate_brightess_from_stack(fovs[self.cal['order'],:,:,:]) 
+
+        if self.i_corr:
+            fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
 
         if 'transform' not in self.cal.keys():
             if is_bead:
                 self.mcal.pretranslate = self.P['pretranslate']
-                self.cal['transform'], self.cal['transform_quality'], self.markers = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                self.cal['transform'], self.cal['transform_quality'], self.markers, self.cal['scaling_factor'] = self.mcal.get_affine_transform_via_quads(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                #self.cal['transform'], self.cal['transform_quality'], self.markers, self.cal['scaling_factor'] = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
                 #self.cal['transform'], self.cal['transform_quality'], self.markers = self.mcal.get_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
                 #self.mcal.display_transformations()
             else:
                 self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
+            # restructure transform 
+            self.cal['transform'] = self.restructure_transform(self.cal['transform'])
 
         if self.P['apply_transform']: 
             print("Registration of data...")
-            registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
+            #registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
+            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'],:,:,:], self.cal['transform']) 
         else: 
             registered_subimages = fovs[self.cal['order'],:,:,:]
         print("Registration of data...")
@@ -236,7 +240,6 @@ class MultiplaneProcess:
             # axes = 'ZCTYX'
             axes = 'CTZYX'
 
-
         if self.save_individual: 
             self.cal['zrange_psf'] = self.P['zrange_psf'] 
             num_slices = int(self.P['zrange_psf']/self.cal['dz_stage'])
@@ -244,12 +247,11 @@ class MultiplaneProcess:
             
             for i in range(registered_subimages.shape[0]):
                 #######################################################
-                slice_start, slice_end = self.get_psf_slices(registered_subimages.shape[1], self.cal['fp'][i], num_slices)
-
-                fp_range = [slice_start, slice_end]
+                #slice_start, slice_end = self.get_psf_slices(registered_subimages.shape[1], self.cal['fp'][i], num_slices)
+                #fp_range = [slice_start, slice_end]
 
                 #tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tiff'), registered_subimages[i,slice_start:slice_end,...],
-                tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tiff'), registered_subimages[i,...], 
+                tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tif'), registered_subimages[i,...], 
                         metadata={
                             'axes': axes,
                             'TimeIncrement': self.P['dt']
@@ -269,6 +271,28 @@ class MultiplaneProcess:
         self.write_marker_planes(registered_subimages)
 
         return self.cal 
+
+    def restructure_transform(self, transforms):
+        """
+        For each transform (dict of 4x3 data), move the first element of each 3-element array to the end.
+
+        Args:
+            transforms (dict): A dictionary where each value is a list of 4 numpy arrays, 
+                            each of shape (3,), representing rows of a transform.
+
+        Returns:
+            dict: A new dictionary with the restructured transforms.
+        """
+        restructured = {}
+        for key, rows in transforms.items():
+            if len(rows) != 4 or not all(isinstance(row, np.ndarray) and row.shape == (3,) for row in rows):
+                #raise ValueError(f"Invalid format for key {key}. Expected 4 arrays of shape (3,).")
+                restructured[key] = rows
+                print(f"Nothing to restructure in transform {key}, skipping...")
+            else:
+                new_rows = [np.array([row[1], row[2], row[0]]) for row in rows]
+                restructured[key] = new_rows
+        return restructured
 
     #get_psf_slices(registered_subimages.shape, self.cal['fp'][i], num_slices)
     def get_psf_slices(self, stack_range, fp, num_slices):
@@ -636,27 +660,19 @@ class MultiplaneProcess:
 
             if bbox_size[i] == shape[i]:
                 bbox[i] = 0
-                #bbox[i+2] = int(np.min([c1 - d, shape[i]]))
                 bbox[i+2] = shape[i]
             else:
-
-                #while bbox[i+2]-bbox[i] < bbox_size[i]:
                 diff = bbox_size[i] - (bbox[i+2]-bbox[i])
-
-                #c0, c1 = int(np.fix(bbox[i]-diff/2)), int(np.round(bbox[i+2]+diff/2))
                 c0, c1 = bbox[i]-diff/2, bbox[i+2]+diff/2
                 d = 0 # final difference to check whether bbox fits into image
-                # can not be both be true due to input check
+                # can not both be true due to input check
                 if c0 < 0: 
                     d = c0
-                #elif c1 > shape[i]-1:
                 elif c1 > shape[i]:
                     d = c1 - shape[i]
                 # min max conditions shouldnt be necessarz here, check again
                 bbox[i] = int(np.max([np.rint(c0 - d), 0]))
-                #bbox[i] = int(c0 - d)
                 bbox[i+2] = int(np.min([np.rint(c1 - d), shape[i]]))
-                #bbox[i+2] = int(c1 - d)
 
                 # safety check cause im a fucking idiot and cant get the stupid numpy rounding rules right (even, odd numbers and .5)
                 # so,metimes bbox is one off, correct that
@@ -778,8 +794,6 @@ class MultiplaneProcess:
 
         output_name = os.path.join(outpath, fname+filetype)
         makeFolder(outpath)
-        #plt.show(f)
-        #plt.gcf()
         f[0].savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
         print(f"Finished writing {output_name}")
 
@@ -877,10 +891,13 @@ class MultiplaneProcess:
             markers = self.mcal.markers
             
         self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
-        cal = {}
-        cal["biplane"], cal["multiplane"]= self.smlcal.biplane_calibration()
+        cal = self.smlcal.biplane_calibration()
+        cal['fp'] = [0.0] + [np.sum(self.cal['dz'][:p+1]) for p in range(len(self.cal['dz']))]
+        cal_outer = {"zcal": cal}
+        outname = os.path.join(self.path, "zcal.mat")
+        scp.io.savemat(outname, cal_outer)
 
-        return cal
+        return cal_outer
 
 
 #########################################
@@ -897,9 +914,7 @@ class MultiplaneProcess:
             transforms[p] = self.find_affine_transformation(stack[self.P['ref_plane']], stack[p])
         return transforms
 
-
-
-
+    '''
     def find_affine_transformation(self, image_stack, reference_stack):
 
         tar = np.max(image_stack, axis=0)
@@ -924,14 +939,18 @@ class MultiplaneProcess:
         dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
 
         # Find the affine transformation matrix
-        matrix, mask = cv2.estimateAffine2D(src_pts, dst_pts)
+        #matrix, mask = cv2.estimateAffine2D(src_pts, dst_pts)
+        matrix= cv2.getAffineTransform(src_pts, dst_pts)
 
         return matrix
-    
+        '''
+
+
     def apply_affine_transformation(self, matrix, img):
         # Apply the affine transformation
         matrix = np.array(matrix, dtype=np.float32)
-        transformed_img = cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]))
+        #transformed_img = cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]))
+        transformed_img = cv2.warpAffine(img, matrix[:2,:], (img.shape[1], img.shape[0]))
         return transformed_img
     
     def register_image_stack(self, stack, matrix):

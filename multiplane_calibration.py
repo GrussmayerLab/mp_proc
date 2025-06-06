@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 from matplotlib.legend import Legend
 import skimage.filters as skfilt
 from skimage import feature, io
+from skimage.transform import AffineTransform, estimate_transform
+from scipy.spatial import cKDTree
 from scipy import ndimage, spatial
 from scipy.optimize import curve_fit
 from tqdm import tqdm 
@@ -25,6 +27,7 @@ cdict = {'violet': "#960792ff",
              'brown':'#994133'}
 '''
 # diverging colortheme, 8 classes
+'''
 cdict = {0:'#d73027', 
          1: '#f46d43',
          2: '#fdae61',
@@ -33,6 +36,25 @@ cdict = {0:'#d73027',
          5: '#abd9e9',
          6: '#74add1',
          7: '#4575b4'}
+'''
+cdict = {
+    0:  '#a50026',
+    1:  '#d73027',
+    2:  '#f46d43',
+    3:  '#fdae61',
+    4:  '#fee090',
+    5:  '#ffffbf',
+    6:  '#e0f3f8',
+    7:  '#abd9e9',
+    8:  '#74add1',
+    9:  '#4575b4',
+    10: '#313695',
+    11: '#2c7bb6',
+    12: '#00a6ca',
+    13: '#00ccbc',
+    14: '#90eb9d',
+    15: '#ffffcc'
+}
 
 global clist
 clist = list(cdict.values())
@@ -51,9 +73,12 @@ class MultiplaneCalibration:
         self.tracks={}
         self.figs = {}
         self.pretranslate = False
+        self.check_tilt = False
         self.kd = {}    # distance trees
         self.quad = {}  # quads 
-
+        self.quad_match = {}  # matched quads  
+        self.scaling_factor = {} # datastore for estimated magnification factor
+        self.check_magnification = True # calculate sparse distance tree and evaluate against others
         self.beadID = {} # bead candidates found in maximum intensity projection
         self.markers = {} # SR loclaised beads in MIP for tranformation finding
         self.transform = {}
@@ -65,9 +90,9 @@ class MultiplaneCalibration:
                    'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
                    'zstep': 10, # default stage zstep size for coregistration nd PSF fitting
                    'min_size': 5.0, # min size for quad finding in distance trees 
-                   'max_size': 100.0, # max size for quad finding in distance trees
+                   'max_size': 300.0, # max size for quad finding in distance trees
                    'tolerance': 0.01,  # tolerance for quad acceptance
-                    'max_neighbours' : 10} #distance tree neighbours
+                    'max_neighbours' : 5} #distance tree neighbours, was == 10
 
 
     def setlog(self, log=bool):
@@ -108,7 +133,12 @@ class MultiplaneCalibration:
         for p in range(planes):
             outer.update(1)
             self.tracks[p] = self.convert_dict_to_array(self.beads[p])
-            
+        
+        if self.check_tilt:
+            outer = tqdm(total=planes, desc='Estimating tilt', position=0)
+            for p in range(planes):
+                self.beads_dxy[p] = self.estimate_dxy(self.beads[p])
+
         print('Determining relative z-distances and order')
         self.dz, self.order = self.get_dz()
         print(self.dz)
@@ -302,12 +332,8 @@ class MultiplaneCalibration:
                     else:  
                         next_point = self.find_closest_neighbour_in_next_frame(tracks[p][-1][:2], next_frame)
                 else: 
-                    
                     next_point = None
-                #if next_point is None:
-                    #beads[bidx].append(np.zeros(4))
-                    #tracks[p].append([bead_pos[p][0], bead_pos[p][1], z, 'None'])
-                #else:
+
                 if next_point is not None:
                     tracks[p].append(next_point)
                     # remove loc from original loc array 
@@ -491,6 +517,7 @@ class MultiplaneCalibration:
     def get_transformation(self, stack, refplane):
         # determine affine transformation between planes
         planes = self.pp['planes']
+        self.refplane = refplane
         
         # if markers are empty, find them first
         outer = tqdm(total=planes, desc='Finding markers', position=0)
@@ -524,7 +551,7 @@ class MultiplaneCalibration:
 
     def apply_transformation(self, stack, transform):
         assert len(stack.shape) == 4, "Input stack must have 4 dimensions"
-        assert stack.shape[0]-1 == len(transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
+        #assert stack.shape[0]-1 == len(transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
         
         if 'planes' in self.pp.keys():
             planes = self.pp['planes']
@@ -542,14 +569,15 @@ class MultiplaneCalibration:
                 pt = np.array(pt)
             for t in range(h):
                 # Transform a single image using the affine transformation matrix
-                stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
+                #stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
+                stack[p,t,...] = ndimage.affine_transform(np.squeeze(stack[p,t,...]), pt[:2, :2], offset=pt[:2, 2])
                 inner.update(1)
                 
             outer.update(1)
 
         return stack
     
-
+    '''
     def calculate_transform(self, ref, tar):
         # ensure ref & tar are of equal length and shorten if not
         pretranslate = self.pretranslate
@@ -585,7 +613,7 @@ class MultiplaneCalibration:
         
         return affine_matrix, tar_match, error_all
     
-
+    '''
 
     def apply_affine_transform_2points(self, points, transform_matrix):
         """
@@ -686,7 +714,7 @@ class MultiplaneCalibration:
         plt.show()
 
 
-
+    '''
     def pre_translate_markers(self, ref, tar):
         # Calculate the centroids of ref and tar
         centroid_ref = np.mean(ref, axis=0)
@@ -708,14 +736,29 @@ class MultiplaneCalibration:
         plt.show()
 
         return ref, aligned_tar, tt
+    
 
 
+    def estimate_dxy(self, tracks):
+        # estimate the displacement along z per bead in a dict of beads
+        # tracks: dict(bead_1, bead_2, bead_3)
+        # bead_n: array([x1,y1,z1,brightness1;
+        #                x2, y2, z2, brightness2])
+        dxy = {}
+        for k in tracks.shape[0]:
+   
+            # interpolate missing z values
+            dxy[k][0] = tracks[k][:,0]
+            #cleaned_tracks[k] = tracks[k]
+        return
 
+    '''
+#############################################
+# new quad based method, just sample all quad based transforms, then take the best
+    def get_affine_transform_via_quads(self, stack, refplane):
 
-
-    def get_micrometry_transformation(self, stack, refplane):
         if self.log:
-            print('Using quad based transformation estimation')
+            print('Using quad based transformation estimation, whole quad combination sampling')
         # determine affine transformation between planes
         planes = self.pp['planes']
         
@@ -725,14 +768,23 @@ class MultiplaneCalibration:
             self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
             outer.update(1)
 
-        outer = tqdm(total=planes, desc='Creating quads', position=0)
+        outer = tqdm(total=planes, desc='Query quads, estimate transform')
+        transform_error_estimate = {}
+        for p in range(planes):
+            transform_error_estimate[p], self.transform[p], self.quad_match[p] = self.estimate_affine_via_quads(self.markers[refplane], self.markers[p], k=4)
+            outer.update(1)
+
+
+
+
+        '''
         # create tree and quad from loc positions
         for p in range(planes):
             [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
                                             y = self.markers[p][:,1],
                                             min_size = self.pp['min_size'],
                                             max_size = self.pp['max_size'],
-                                            max_neighbors = 10)
+                                            max_neighbors = self.pp['max_neighbours'])
             self.kd[p] = kd
             self.quad[p] = quad
             outer.update(1)
@@ -741,7 +793,7 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes, desc='Calculating transform')
         transform_error_estimate = {}
         for p in range(planes):
-            [transform_error_estimate[p], self.transform[p]] = self.findTransform(ref_quad=self.quad[refplane],
+            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
                                                                                     other_quad = self.quad[p],
                                                                                     ref_kd=self.kd[refplane],
                                                                                     other_kd=self.kd[p])
@@ -751,10 +803,146 @@ class MultiplaneCalibration:
                 plotMatch(self.kd[refplane],
                         self.kd[p],
                         self.transform[p],
-                        save_as = f"transform_ref{refplane}_other{p}.png",
+                        #save_as = f"transform_ref{refplane}_other{p}.png",
                         show = self.log)
+        '''
+        if self.check_magnification:
+            outer = tqdm(total=planes, desc='Creating quads')
+            # create tree and quad from loc positions
+            for p in range(planes):
+                if self.quad_match[p]['ref'] is None:
+                    self.scaling_factor[p] = None
+                    print(f'Skipping magnification check for plane {p}, no valid points found.')
+                else:
+                    self.scaling_factor[p] = self.compute_scaling_factor(self.quad_match[p]['ref'], 
+                                                            self.quad_match[p]['other'] )
+                
+                
             
-        return self.transform, self.transform_error, self.markers
+        return self.transform, self.transform_error, self.markers, self.scaling_factor
+
+
+
+    def estimate_affine_via_quads(self, src, dst, k=4):
+        src_tree = cKDTree(src)
+        dst_tree = cKDTree(dst)
+        idx_src = src_tree.query(src, k=k)[1]
+        idx_dst = dst_tree.query(dst, k=k)[1]
+        
+        best_error = float('inf')
+        best_tf = None
+
+        for i in range(len(src)):
+            quad_src = src[idx_src[i]]
+            quad_dst = dst[idx_dst[i]]
+            if len(quad_src) >= 3 and len(quad_dst) >= 3:
+                try:
+                    tf = estimate_transform('affine', quad_src, quad_dst)
+                    transformed = tf(quad_src)
+                    error = np.mean(np.linalg.norm(transformed - quad_dst, axis=1))
+                    if error < best_error:
+                        best_error = error
+                        best_tf = tf
+                        best_quad_index = i
+                except Exception:
+                    continue
+
+        return best_error, best_tf.params[:2, :], {'ref' : src[idx_src[best_quad_index]], 'other' :dst[idx_dst[best_quad_index]]}
+
+
+
+# end of new quad sampling method
+######################################################
+
+
+    def get_micrometry_transformation(self, stack, refplane):
+        # calculate affine transform via babcock code base  
+        if self.log:
+            print('Using babcock quad based transformation estimation')
+        # determine affine transformation between planes
+        planes = self.pp['planes']
+        
+        # if markers are empty, find them first
+        outer = tqdm(total=planes, desc='Finding markers', position=0)
+        for p in range(planes):
+            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
+            outer.update(1)
+
+        outer = tqdm(total=planes, desc='Creating quads')
+        # create tree and quad from loc positions
+        for p in range(planes):
+            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
+                                            y = self.markers[p][:,1],
+                                            min_size = self.pp['min_size'],
+                                            max_size = self.pp['max_size'],
+                                            max_neighbors = self.pp['max_neighbours'])
+            self.kd[p] = kd
+            self.quad[p] = quad
+            outer.update(1)
+
+        # calculate tranformation
+        outer = tqdm(total=planes, desc='Calculating transform')
+        transform_error_estimate = {}
+        for p in range(planes):
+            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
+                                                                                    other_quad = self.quad[p],
+                                                                                    ref_kd=self.kd[refplane],
+                                                                                    other_kd=self.kd[p])
+            outer.update(1)
+
+            if (transform_error_estimate[p] > 10.0):
+                plotMatch(self.kd[refplane],
+                        self.kd[p],
+                        self.transform[p],
+                        #save_as = f"transform_ref{refplane}_other{p}.png",
+                        show = self.log)
+
+        if self.check_magnification:
+            outer = tqdm(total=planes, desc='Creating quads')
+            # create tree and quad from loc positions
+            for p in range(planes):
+                if self.quad_match[p]['ref'] is None:
+                    self.scaling_factor[p] = None
+                    print(f'Skipping magnification check for plane {p}, no valid points found.')
+                else:
+                    self.scaling_factor[p] = self.compute_scaling_factor(self.quad_match[p]['ref'], 
+                                                            self.quad_match[p]['other'] )
+                
+                
+            
+        return self.transform, self.transform_error, self.markers, self.scaling_factor
+    
+    def compute_scaling_factor(self, points_ref, points_other):
+        '''
+        If image has a different magnification, relative distances between markers should remain consistent
+        but the absolute distances will scale by a magnification factor.
+        Should be equal amount of markers -> use quads from transformation estimation. 
+        '''
+        #dsitance matrices
+        D_ref = self.compute_distance_matrix(points_ref)
+        D_other = self.compute_distance_matrix(points_other)
+
+        # normalise
+        D_ref_norm = self.normalize_matrix(D_ref)
+        D_other_norm = self.normalize_matrix(D_other)
+
+        #scaling fator = 
+        sfs = D_other_norm/D_ref_norm
+        sf = np.median(sfs[np.isfinite(sfs)])
+
+        return sf
+
+
+    def compute_distance_matrix(self, points):
+        n = points.shape[0]
+        dist_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                dist_matrix[i, j] = np.linalg.norm(points[i] - points[j])
+        return dist_matrix
+
+    def normalize_matrix(self, matrix):
+        return matrix / np.max(matrix)
 
 ################################################################################
 # Micrometry babcock
@@ -794,6 +982,8 @@ class MultiplaneCalibration:
         best_ratio = 0.0
         best_transform = None
         matches = 0
+        quad_match = {'ref': None, 
+                        'other': None}
         for q1 in ref_quad:
             for q2 in other_quad:
                 if q1.isMatch(q2, tolerance = tolerance):
@@ -804,12 +994,14 @@ class MultiplaneCalibration:
                     if (ratio > best_ratio):
                         best_ratio = ratio
                         best_transform = q1.getTransform(q2) + q2.getTransform(q1)
+                        quad_match['ref'] = np.vstack([q1.A, q1.B, q1.C, q1.D])
+                        quad_match['other'] = np.vstack([q2.A, q2.B, q2.C, q2.D])
                     matches += 1
 
         if self.log:
             print("Found", matches, "matching quads")
 
-        return [best_ratio, best_transform]
+        return [best_ratio, best_transform, quad_match]
     
 
 
@@ -841,7 +1033,7 @@ def fgProbability(kd1, kd2, transform, bg_p):
     return fg_p
 
     
-def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = 10):
+def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = None):
     """
     Make a KD tree and a list of quads from x, y points.
     """
