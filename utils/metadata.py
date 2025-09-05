@@ -24,9 +24,6 @@ def getHeader(text):
                 header[key] = info
     return header
             
-    
-    
-
 
 def getFrames(text):
     REG = re.compile("(FrameKey-)(\d+-\d+-\d+)")
@@ -48,8 +45,27 @@ def getFrames(text):
         raw_text.append(line)    
     frames[F-1]["text"] = raw_text[1:]   
     #print('Found on line %s: %s' % (i+1, match.group()))
+
+    # parse the frame info from text into a dictionary 
+    for idx, frame in frames.items():
+        frames[idx]["info"] = parse_single_frame_info(frame["text"])
+        del frames[idx]['text'] 
+
     return frames
-    
+
+
+def parse_single_frame_info(text):
+    info_dict = {}
+    for line in text:
+        # Strip leading/trailing whitespace and remove commas and quotes
+        line = line.strip().rstrip(',')
+        if ':' in line:
+            key_part, value_part = line.split(':', 1)
+            key = key_part.strip().strip('"')
+            value = value_part.strip().strip('"')
+            info_dict[key] = value
+    return info_dict
+
     
 def getXPosFromFrame(metadata, frame):
     FRAMES = []

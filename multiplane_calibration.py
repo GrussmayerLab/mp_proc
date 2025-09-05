@@ -56,6 +56,7 @@ cdict = {
     15: '#ffffcc'
 }
 
+
 global clist
 clist = list(cdict.values())
 
@@ -79,20 +80,23 @@ class MultiplaneCalibration:
         self.quad_match = {}  # matched quads  
         self.scaling_factor = {} # datastore for estimated magnification factor
         self.check_magnification = True # calculate sparse distance tree and evaluate against others
+        self.check_transform_error = True # calculate RSM error for each transformation per plane in nm
         self.beadID = {} # bead candidates found in maximum intensity projection
         self.markers = {} # SR loclaised beads in MIP for tranformation finding
-        self.transform = {}
+        self.full_transform = {} # full transformation object for each plane
+        self.transform = {} # affine transformation matrix for each plane
         self.transform_error = {}
         #processing parameters
         self.pp = {'gauss_sigma': 1.5, # sigma for DoG gaussian kernel
-                   'roi' : 10, # roi radius around peak, to delete locs near edges 
+                   'roi' : 7, # roi radius around peak, to delete locs near edges 
                    'frame_min' : 15, # min amount of consecutive frames to consider it a bead trace
                    'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
                    'zstep': 10, # default stage zstep size for coregistration nd PSF fitting
                    'min_size': 5.0, # min size for quad finding in distance trees 
-                   'max_size': 300.0, # max size for quad finding in distance trees
+                   'max_size': 500.0, # max size for quad finding in distance trees
                    'tolerance': 0.01,  # tolerance for quad acceptance
-                    'max_neighbours' : 5} #distance tree neighbours, was == 10
+                    'max_neighbours' : 5,  #distance tree neighbours, was == 10
+                    'k' : 6} # number of neighbours to consider for quad finding
 
 
 #     def setlog(self, log=bool):
@@ -276,47 +280,6 @@ class MultiplaneCalibration:
         return pos_sr
 
 
-#     def track_locs_in_z_all(self, pos_sr):
-#        # assuming there is only one or less corresponding loc per frame in z
-#        beads = {}
-#        bidx = 0 # bead_idx 
-#        run = True
-#        z_loop = 0
-#        max_frames = self.pp['planes']
-#        #pos_sr = self.pos_sr.copy()
-#        while run:
-#            
-#            # search for new bead position in current z_loop 
-#            loc = next((l for l in pos_sr if l[2] == z_loop), None)
-#            if loc is None:
-#                if z_loop != max_frames:
-#                    z_loop += 1
-#                else:     
-#                    run = False
-#                    break
-#
-#            else:
-#                # if unaccounted localisation exist, assign to a new bead and iterate through the stack to find its corresponding z-positions
-#                beads[bidx] = [loc]
-#                pos_sr = delete_loc(pos_sr, loc) 
-#                #np.delete(pos_sr, loc, axis=0)
-#                
-#                for z in range(z_loop+1, max_frames):
-#                    next_frame = pos_sr[pos_sr[:,2]==z]
-#                    next_point = self.find_closest_neighbour_in_next_frame(beads[bidx][-1][:2], next_frame)
-#                    if next_point is None:
-#                        #beads[bidx].append(np.zeros(4))
-#                        beads[bidx].append(['None', 'None', z, 'None'])
-#                    else:
-#                        beads[bidx].append(next_point)
-#                        # remove loc from original loc array 
-#                        pos_sr = delete_loc(pos_sr, next_point)
-#
-#                bidx += 1 # update bead idx after loop through stack for new assigment 
-#        
-#        return beads
-#    
-#
     def track_locs_in_z(self, pos_sr, bead_pos):
         # assuming there is only one or less corresponding loc per frame in z
         tracks = {}
@@ -469,13 +432,13 @@ class MultiplaneCalibration:
         if xangle > 0:
             xangle -= 2*np.pi
         #Calculate position based on the ROI radius
-        xpos = abs(xangle)/(2*np.pi/(self.pp['roi']*2+1))+0.5
+        xpos = abs(xangle)/(2*np.pi/(self.pp['roi']*2))
 
         #Do the same for the Y angle and position
         yangle = np.arctan(roi_f[1,0].imag/roi_f[1,0].real) - np.pi
         if yangle > 0:
             yangle -= 2*np.pi
-        ypos = abs(yangle)/(2*np.pi/(self.pp['roi']*2+1))+0.5
+        ypos = abs(yangle)/(2*np.pi/(self.pp['roi']*2))
 
         return (xpos,ypos)
     
@@ -664,14 +627,14 @@ class MultiplaneCalibration:
         # localise candidates from MIP stack
         assert len(stack.shape)==3, "stack has wrong dimensions"
         assert plane != None, "provide plane information to use focal plane for marker ID, now using maximum projection"
-        z_pos, Nx, Ny = stack.shape
 
         try: 
             mip = stack[self.dz['fp'][plane], ...]
-            id = self.locs_from_2d(mip) 
         except:
             print("reverting to maximum projection in marker ID")
             mip = np.max(stack, axis=0)
+
+        id = self.locs_from_2d(mip) # get local maxima from 2d image (MIP or focal plane)
         
         rr = self.pp['roi']
         pos_sr = np.empty((id.shape[0], 2), dtype=np.float32)
@@ -694,67 +657,55 @@ class MultiplaneCalibration:
         return pos_sr
     
 
-#     def display_transformations(self):
-#        # Create a simple grid
-#        x = np.linspace(0, 100, 26)
-#        y = np.linspace(0, 100, 26)
-#        grid_x, grid_y = np.meshgrid(x, y)
-#        grid_points = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
-#        
-#        # Plot the original and transformed grids
-#        fig, axs = plt.subplots(1, len(self.transform.keys())+1, figsize=(15, 10))
-#
-#        plot_grid(axs[0], grid_points, 'default')
-#
-#        for ax, (name, matrix) in zip(axs[1:], self.transform.items()):
-#            transformed_points = apply_display_affine_transform(matrix, grid_points)
-#            plot_grid(ax, transformed_points, name)
-#
-#        plt.tight_layout()
-#        plt.show()
-#
-#
-    '''
-    def pre_translate_markers(self, ref, tar):
-        # Calculate the centroids of ref and tar
-        centroid_ref = np.mean(ref, axis=0)
-        centroid_tar = np.mean(tar, axis=0)
-        
-    
-        plt.figure()
-        plt.scatter(tar[:,0], tar[:,1], color='r')
-        plt.scatter(ref[:,0], ref[:,1])
-        plt.scatter(centroid_ref[0], centroid_ref[1], color="black")
-        plt.scatter(centroid_tar[0], centroid_tar[1], color="green")
 
-        # Step 2: Calculate the translation vector
-        tt = centroid_ref - centroid_tar
+
+    def visualise_markers(self, stack, markers):
         
-        # Step 3: Apply the translation to tar
-        aligned_tar = tar + tt
-        plt.scatter(aligned_tar[:,0], aligned_tar[:,1], color='r', marker='+')
+        import matplotlib.patches as mpatches
+        # how many planes are we dealing with?
+        planes = list(self.markers.keys())
+        # initialise figure
+        fig, ax = plt.subplots(nrows=2, ncols=int(len(planes)/2), figsize=(10, 6))
+        rr= self.pp['roi']
+        for p, ax in zip(planes, ax.flatten()):
+            # select the image to display
+            try: 
+                ffp = self.dz['fp'][p]
+                im = stack[p, ffp, ...]
+            except: # just in case somethin is wrong with indexing, use MIP
+                im = np.max(stack, axis=0)
+                ffp = '--'
+
+
+            ax.imshow(im, cmap='gray')
+            for loc in markers[p]:
+                
+                if loc[0]-rr > 0 and loc[1]-rr > 0 and loc[0]+rr < im.shape[0] and loc[1]+rr < im.shape[1]:
+                    # draw rectangle around segmented coins
+                    c_inv = [loc[1], loc[0]]
+                    rect = mpatches.Rectangle(
+                        (c_inv[0]-rr,c_inv[1]-rr),
+                        2*rr,
+                        2*rr,
+                        fill=False,
+                        edgecolor='red',
+                        linewidth=1,
+                    )
+                    ax.add_patch(rect)
+            ax.set_axis_off()
+
+            ax.set_title(f'Plane {p} markers, slice {ffp}', fontsize=12)
+        plt.tight_layout()
         plt.show()
 
-        return ref, aligned_tar, tt
-    
 
 
-#     def estimate_dxy(self, tracks):
-#        # estimate the displacement along z per bead in a dict of beads
-#        # tracks: dict(bead_1, bead_2, bead_3)
-#        # bead_n: array([x1,y1,z1,brightness1;
-#        #                x2, y2, z2, brightness2])
-#        dxy = {}
-#        for k in tracks.shape[0]:
-#   
-#            # interpolate missing z values
-#            dxy[k][0] = tracks[k][:,0]
-#            #cleaned_tracks[k] = tracks[k]
-#        return
-#
-    '''
-#############################################
-# new quad based method, just sample all quad based transforms, then take the best
+
+
+
+
+    #############################################
+    # new quad based method, just sample all quad based transforms, then take the best
     def get_affine_transform_via_quads(self, stack, refplane):
 
         if self.log:
@@ -768,46 +719,21 @@ class MultiplaneCalibration:
             self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
             outer.update(1)
 
+        # plot markers on top of original image
+        self.visualise_markers(stack, self.markers)
+
         outer = tqdm(total=planes, desc='Query quads, estimate transform')
         transform_error_estimate = {}
         for p in range(planes):
-            transform_error_estimate[p], self.transform[p], self.quad_match[p] = self.estimate_affine_via_quads(self.markers[refplane], self.markers[p], k=4)
+            transform_error_estimate[p], self.full_transform[p], self.transform[p], self.quad_match[p] = self.estimate_affine_via_quads(self.markers[refplane], self.markers[p], k=self.pp['k'])
             outer.update(1)
 
+        self.visualise_transform(self.transform, self.quad_match, show_rmse=True, title='Quad-based Affine Transformations')  
 
+        self.transform_error = transform_error_estimate
 
-
-        '''
-        # create tree and quad from loc positions
-        for p in range(planes):
-            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
-                                            y = self.markers[p][:,1],
-                                            min_size = self.pp['min_size'],
-                                            max_size = self.pp['max_size'],
-                                            max_neighbors = self.pp['max_neighbours'])
-            self.kd[p] = kd
-            self.quad[p] = quad
-            outer.update(1)
-
-        # calculate tranformation
-        outer = tqdm(total=planes, desc='Calculating transform')
-        transform_error_estimate = {}
-        for p in range(planes):
-            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
-                                                                                    other_quad = self.quad[p],
-                                                                                    ref_kd=self.kd[refplane],
-                                                                                    other_kd=self.kd[p])
-            outer.update(1)
-
-            if (transform_error_estimate[p] > 10.0):
-                plotMatch(self.kd[refplane],
-                        self.kd[p],
-                        self.transform[p],
-                        #save_as = f"transform_ref{refplane}_other{p}.png",
-                        show = self.log)
-        '''
         if self.check_magnification:
-            outer = tqdm(total=planes, desc='Creating quads')
+            print(f'Checking magnification variance between planes...')
             # create tree and quad from loc positions
             for p in range(planes):
                 if self.quad_match[p]['ref'] is None:
@@ -823,6 +749,68 @@ class MultiplaneCalibration:
 
 
 
+
+    def visualise_transform(self, transform_dict, markers, show_rmse=True, title=None):
+        """
+        Create a subplot for each affine transform and visualize the marker sets.
+
+        Parameters:
+        - transform_dict: dict of {p: 2x3 affine matrix}
+        - markers: dict of {p: {'ref': (N,2), 'other': (N,2)}}
+        - show_rmse: whether to compute and display RMSE
+        - title: overall figure title
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import math
+
+        n = len(markers)
+        n_cols = min(4, n)
+        n_rows = math.ceil(n / n_cols)
+
+        fig, axs = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+        axs = np.array(axs).reshape(-1)  # flatten in case of 1D
+
+        for idx, (p, ax) in enumerate(zip(markers, axs)):
+            ref = markers[p]['ref']
+            other = markers[p]['other']
+            transform = transform_dict[p]
+
+            transformed = self.apply_affine_transform_2points(other, transform)
+            rmse = np.sqrt(np.mean(np.sum((transformed - ref) ** 2, axis=1)))
+
+            
+            ax.scatter(ref[:, 1], ref[:, 0], facecolors='none', edgecolors='blue', label='ref', marker='o', alpha=0.7)
+            ax.scatter(other[:, 1], other[:, 0], color='magenta', label='original', marker='x', alpha=0.7)
+            ax.scatter(transformed[:, 1], transformed[:, 0], color='black', label='transformed', marker='x', alpha=0.7)
+
+            for i in range(ref.shape[0]):
+                ax.plot([ref[i, 1], transformed[i, 1]],
+                        [ref[i, 0], transformed[i, 0]], color='gray', linestyle='--', linewidth=0.8)
+
+            ax.set_aspect('equal')
+            ax.grid(True)
+            ax.set_title(f'p={p}' + (f' | RMSE={rmse:.3f} pixels' if show_rmse else ''))
+            ax.legend(fontsize='small')
+            ax.set_xlim(0,  self.pp['stack_sx'])
+            ax.set_ylim(self.pp['stack_sy'], 0)
+
+        # Hide unused subplots if any
+        for j in range(idx + 1, len(axs)):
+            axs[j].axis('off')
+
+        if title:
+            fig.suptitle(title, fontsize=14)
+
+        plt.tight_layout()
+        plt.show()
+
+
+
+
+    
+    from scipy.spatial import cKDTree
+
     def estimate_affine_via_quads(self, src, dst, k=4):
         src_tree = cKDTree(src)
         dst_tree = cKDTree(dst)
@@ -832,85 +820,29 @@ class MultiplaneCalibration:
         best_error = float('inf')
         best_tf = None
 
-        for i in range(len(src)):
-            quad_src = src[idx_src[i]]
-            quad_dst = dst[idx_dst[i]]
-            if len(quad_src) >= 3 and len(quad_dst) >= 3:
-                try:
-                    tf = estimate_transform('affine', quad_src, quad_dst)
-                    transformed = tf(quad_src)
-                    error = np.mean(np.linalg.norm(transformed - quad_dst, axis=1))
-                    if error < best_error:
-                        best_error = error
-                        best_tf = tf
-                        best_quad_index = i
-                except Exception:
-                    continue
+        for i in range(len(idx_src)):
+            for j in range(len(idx_dst)):
+                #try:
+                    quad_src = src[idx_src[i]]
+                    quad_dst = dst[idx_dst[j]]
+                    if len(quad_src) >= 3 and len(quad_dst) >= 3:
+                    
+                        tf = estimate_transform('affine', quad_dst, quad_src)
+                        transformed = tf(quad_src)
+                        error =  np.sqrt(np.mean(np.sum((transformed - quad_dst) ** 2, axis=1))) # np.sqrt(np.mean((transformed - quad_dst)**2)) 
+                        if error < best_error:
+                            best_error = error
+                            best_tf = tf
+                            best_quad_index_src = i
+                            best_quad_index_dst = j
+                #except Exception:
+                #    if self.log:
+                #        print(f"Skipping quad {i} evaluation for transform, weird indexing error.")
+                #    continue
 
-        return best_error, best_tf.params[:2, :], {'ref' : src[idx_src[best_quad_index]], 'other' :dst[idx_dst[best_quad_index]]}
+        return best_error, best_tf, best_tf.params[:2, :], {'ref' : src[idx_src[best_quad_index_src]], 'other' :dst[idx_dst[best_quad_index_dst]]}
 
 
-
-# end of new quad sampling method
-######################################################
-
-
-#     def get_micrometry_transformation(self, stack, refplane):
-#        # calculate affine transform via babcock code base  
-#        if self.log:
-#            print('Using babcock quad based transformation estimation')
-#        # determine affine transformation between planes
-#        planes = self.pp['planes']
-#        
-#        # if markers are empty, find them first
-#        outer = tqdm(total=planes, desc='Finding markers', position=0)
-#        for p in range(planes):
-#            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
-#            outer.update(1)
-#
-#        outer = tqdm(total=planes, desc='Creating quads')
-#        # create tree and quad from loc positions
-#        for p in range(planes):
-#            [kd, quad] = makeTreeAndQuads(x = self.markers[p][:,0], 
-#                                            y = self.markers[p][:,1],
-#                                            min_size = self.pp['min_size'],
-#                                            max_size = self.pp['max_size'],
-#                                            max_neighbors = self.pp['max_neighbours'])
-#            self.kd[p] = kd
-#            self.quad[p] = quad
-#            outer.update(1)
-#
-#        # calculate tranformation
-#        outer = tqdm(total=planes, desc='Calculating transform')
-#        transform_error_estimate = {}
-#        for p in range(planes):
-#            [transform_error_estimate[p], self.transform[p], self.quad_match[p]] = self.findTransform(ref_quad=self.quad[refplane],
-#                                                                                    other_quad = self.quad[p],
-#                                                                                    ref_kd=self.kd[refplane],
-#                                                                                    other_kd=self.kd[p])
-#            outer.update(1)
-#
-#            if (transform_error_estimate[p] > 10.0):
-#                plotMatch(self.kd[refplane],
-#                        self.kd[p],
-#                        self.transform[p],
-#                        #save_as = f"transform_ref{refplane}_other{p}.png",
-#                        show = self.log)
-#
-#        if self.check_magnification:
-#            outer = tqdm(total=planes, desc='Creating quads')
-#            # create tree and quad from loc positions
-#            for p in range(planes):
-#                if self.quad_match[p]['ref'] is None:
-#                    self.scaling_factor[p] = None
-#                    print(f'Skipping magnification check for plane {p}, no valid points found.')
-#                else:
-#                    self.scaling_factor[p] = self.compute_scaling_factor(self.quad_match[p]['ref'], 
-#                                                            self.quad_match[p]['other'] )
-#                
-#                
-#            
-#        return self.transform, self.transform_error, self.markers, self.scaling_factor
 #    
     def compute_scaling_factor(self, points_ref, points_other):
         '''
@@ -1045,43 +977,6 @@ def makeTreeAndQuads(x, y, min_size = None, max_size = None, max_neighbors = Non
     return [kd, m_quads]
 
 
-# def plotMatch(kd1, kd2, transform, save_as = None, show = True):
-#    [x2, y2] = applyTransform(kd2, transform)
-#    
-#    fig = plt.figure()
-#    plt.scatter(kd1.data[:,0], kd1.data[:,1], facecolors = 'none', edgecolors = 'red', s = 100)
-#    plt.scatter(x2, y2, color = 'green', marker = '+', s = 100)
-#
-#    legend = plt.legend(('reference', 'other'), loc=1)
-#    plt.xlabel("pixels")
-#    plt.ylabel("pixels")
-#
-#    ax = plt.gca()
-#    ax.set_aspect('equal')
-#
-#    if save_as is not None:
-#        fig.savefig(save_as)
-#    
-#    if show:
-#        plt.show()
-#
-#
-# def prettyPrintTransform(transform):
-#    """
-#    Pretty print the transform.
-#    """
-#    print("Reference to other transform:")
-#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[2][0], transform[2][1], transform[2][2]))
-#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[3][0], transform[3][1], transform[3][2]))
-#    print("")
-#    print("Other to reference transform:")
-#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[0][0], transform[0][1], transform[0][2]))
-#    print("  {0:.4f} {1:.4f} {2:.4f}".format(transform[1][0], transform[1][1], transform[1][2]))
-#    print("")
-#
-################################################################################
-# END CLASS
-################################################################################
 
 def plot2LinesVerticalMarkers(data1, data2, n, xMarker, yval, ZDIST = 1):
     
@@ -1104,22 +999,19 @@ def plot2LinesVerticalMarkers(data1, data2, n, xMarker, yval, ZDIST = 1):
         plt.vlines(xMarker[idx]*ZDIST, minVal, maxVal, color=clist[idx])
 
     plt.ylim((minVal, maxVal))
-    plt.xlim((0,np.max(z)))
+    plt.xlim((np.min(z),np.max(z)))
     plt.xlabel("z 1/nm")
     plt.ylabel(yval)
-    #leg = Legend(ax, LINES, lgd, loc='lower right', bbox_to_anchor=(0.5, 1.), frameon=False)
     leg = Legend(ax, LINES, lgd, loc='upper right')
     
     ax.add_artist(leg)
     
     ax.spines.right.set_visible(False)
     ax.spines.top.set_visible(False)
-    #fig = ax.get_figure()
+
     return fig, ax
     
-#    output_name = os.path.join(outpath, fileSpecifier+".svg")
-#    plt.savefig(output_name, dpi = 600, bbox_inches="tight", pad_inches=0.1, transparent=True)    
-    
+
 
 def absolute_intensity(ROI, xy):
     w = [xy[0]-np.floor(xy[0]), xy[1]-np.floor(xy[1])]
@@ -1206,17 +1098,3 @@ def delete_loc(matrix, loc_to_delete):
 def gaussian(x, amp, mean, stddev, offset):
     return amp * np.exp(-((x - mean) ** 2) / (2 * stddev ** 2)) + offset
 
-# Function to plot the original and transformed grid
-# def plot_grid(ax, points, title, color='b'):
-#    #ax.plot(points[:, 0], points[:, 1], color + '-o', markersize=3)
-#    ax.scatter(points[:, 0], points[:, 1], s=3, c=color, marker='o')
-#    ax.set_title(title)
-#    #ax.set_xlim(-2, 10)
-#    #ax.set_ylim(-2, 10)
-#    ax.grid(True)
-#    ax.set_aspect('equal')
-#
-#
-# def apply_display_affine_transform(matrix, points):
-#    transformed_points = np.dot(matrix[:, :2], points.T).T + matrix[:, 2]
-#    return transformed_points

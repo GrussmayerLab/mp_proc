@@ -76,6 +76,8 @@ class MultiplaneProcess:
         self.mcal = None # multiplane calibration instance
         self.smlcal = None
         self.markers = {}
+        self.th_weights = (4,1) # weights for background and otsu thresholding in adaptive thresholding
+        self.save_in_subfolders = False # save each plane in a separate subfolder
 
         #self.path = self.select_data_directory()
 
@@ -186,7 +188,20 @@ class MultiplaneProcess:
         # write stack properties
         self.cal['steps'] = image.shape[0]
         self.cal['dz_stage'] = self.P['dz_stage']
-        
+        self.cal['pxlsize'] = self.P['pxlsize']
+        self.cal['ncams'] = self.P['ncams']
+        self.cal['fname'] = self.filenames[0]
+
+        # get global ROI from metadata or insert dummy ROI
+        self.cal[f'global_roi']={}
+        for i in range(int(self.P['ncams'])):
+            if 'global_roi' not in self.P.keys():
+                self.cal['global_roi'][i] = [0,0,100,100]
+                print(f"Inserting dummy global ROI {self.cal['global_roi'][i]}, please set parameters in final file")
+            else:    
+                self.cal['global_roi'][i] = self.P['global_roi'] ## currently only one ROI available, still to be fixed from camera metadata maybe? 
+                print(f"Using global ROI {self.cal['global_roi'][i]} from parameters, might be erroneous due to missing metadata")
+
         # find bbox and skew angle
         fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image, n_planes=self.P['nplanes']) 
 
@@ -215,10 +230,11 @@ class MultiplaneProcess:
         if 'transform' not in self.cal.keys():
             if is_bead:
                 self.mcal.pretranslate = self.P['pretranslate']
-                self.cal['transform'], self.cal['transform_quality'], self.markers, self.cal['scaling_factor'] = self.mcal.get_affine_transform_via_quads(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
-                #self.cal['transform'], self.cal['transform_quality'], self.markers, self.cal['scaling_factor'] = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
-                #self.cal['transform'], self.cal['transform_quality'], self.markers = self.mcal.get_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                self.cal['transform'], self.cal['transform_error_rmse'], self.markers, self.cal['scaling_factor'] = self.mcal.get_affine_transform_via_quads(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
+                #self.cal['transform'], self.cal['transform_error_rmse'], self.markers, self.cal['scaling_factor'] = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
                 #self.mcal.display_transformations()
+                # scale RMSE to pixel size (needs to be per plane// dict format)
+                #self.cal['transform_error_rmse'] = self.cal['transform_error_rmse']*self.P['pxlsize'] 
             else:
                 self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
             # restructure transform 
@@ -230,7 +246,7 @@ class MultiplaneProcess:
             registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'],:,:,:], self.cal['transform']) 
         else: 
             registered_subimages = fovs[self.cal['order'],:,:,:]
-        print("Registration of data...")
+            print("Registration of data...")
         
 
         registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
@@ -240,37 +256,52 @@ class MultiplaneProcess:
             # axes = 'ZCTYX'
             axes = 'CTZYX'
 
-        if self.save_individual: 
-            self.cal['zrange_psf'] = self.P['zrange_psf'] 
-            num_slices = int(self.P['zrange_psf']/self.cal['dz_stage'])
-            self.cal['psf_slices'] = 2*num_slices
+        ##### OUT PUT FILE WRITING
+        self.create_cal_path()
+        
+        # first write individual planes to disk
+        self.cal['zrange_psf'] = self.P['zrange_psf'] 
+        num_slices = np.abs(int(self.P['zrange_psf']/self.cal['dz_stage']))
+        self.cal['psf_slices'] = 2*num_slices
+        
+        for i in range(registered_subimages.shape[0]):
+            tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tif'), registered_subimages[i,...], 
+                    metadata={
+                        'axes': axes,
+                        'TimeIncrement': self.P['dt']
+                    }
+                ) 
             
-            for i in range(registered_subimages.shape[0]):
-                #######################################################
-                #slice_start, slice_end = self.get_psf_slices(registered_subimages.shape[1], self.cal['fp'][i], num_slices)
-                #fp_range = [slice_start, slice_end]
+        # then write whole stack to disk
 
-                #tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tiff'), registered_subimages[i,slice_start:slice_end,...],
-                tifffile.imwrite(os.path.join(self.cal_path, f'beads_zcal_ch{i}.tif'), registered_subimages[i,...], 
-                        metadata={
-                            'axes': axes,
-                            'TimeIncrement': self.P['dt']
-                        }
-                    ) 
-        else:
-            self.create_cal_path()
-            tifffile.imwrite(os.path.join(self.cal_path, self.filenames[0]), registered_subimages, 
-                        metadata={
-                            'axes': axes,
-                            'TimeIncrement': self.P['dt'],
-                            'ZSpacing': self.P['dz']
-                        }
-                    ) 
+        tifffile.imwrite(os.path.join(self.cal_path, self.filenames[0]), registered_subimages, 
+                    metadata={
+                        'axes': axes,
+                        'TimeIncrement': self.P['dt'],
+                        'ZSpacing': self.P['dz']
+                    }
+                ) 
+
+        # add processing parameters to file
+        for k in self.P.keys():
+            if k not in self.cal.keys():
+                self.cal[k] = self.P[k]
+
 
         self.write_calibration()
+        self.write_processing()
         self.write_marker_planes(registered_subimages)
 
         return self.cal 
+
+
+
+    def write_processing(self):
+        # write processing parameters to file
+        with open(os.path.join(self.path, 'processing.yaml'), 'w') as yaml_file:
+            yaml.dump(self.P, yaml_file, default_flow_style=False)
+        print("Processing parameters written to file")
+        
 
     def restructure_transform(self, transforms):
         """
@@ -328,7 +359,7 @@ class MultiplaneProcess:
            #    data_file.create_dataset(f'locs_{i}.hd5f', data=self.markers[i])
            fp = self.cal['fp'][i] 
            tifffile.imwrite(os.path.join(self.cal_path, f'fp_{i}.tiff'), stack[i,fp,...])     
-           print("Finished writing marker planes")
+           print(f"Finished writing marker plane {i}")
 
 
     def get_files_with_metadata(self):
@@ -346,20 +377,37 @@ class MultiplaneProcess:
     def parse_metafile(self, filename):
         info = meta.openMetadata(os.path.join(self.path,self.meta[filename]['file']))
         header = meta.getHeader(info)
-        return header 
+        frame_info = meta.getFrames(info)
+        return header, frame_info
     
 
 
     def get_metadata(self):
         for k in self.meta.keys():
-            self.meta[k] = self.parse_metafile(k)
+            self.meta[k], self.meta[k]['frame_info'] = self.parse_metafile(k)
         return self.meta
     
     def update_metadata(self, filename=None):
         if filename is None: 
             filename = list(self.meta.keys())[0]
+        self.P['dz_stage']=  np.round(float(self.meta[filename]['z-step_um']), 4)*1000 #nm
+        print(f"Updated zstage displacement per frame to: {self.P['dz_stage']:.1f} nm")
         
-        self.P['dz_stage']=  float(self.meta[filename]['z-step_um'])*1000 #nm
+        # get first frame and read out metadata info 
+        frame_keys = list(self.meta[filename]['frame_info'].keys())
+        frame_info = self.meta[filename]['frame_info'][frame_keys[0]]['info']
+        if 'ROI' in frame_info.keys():
+            # if ROI is defined, update global ROI
+            roi = frame_info['ROI']
+        else:
+            print("No ROI defined in metadata, using default global ROI")
+            roi = '0-0-100-100' # default ROI, to be adjusted later
+        self.P['global_roi'] = [int(i) for i in roi.split('-')]
+        print("Updated global ROI to: ", self.P['global_roi'])
+
+        if 'PixelSizeUm' in frame_info.keys():
+            self.P['pxlsize'] = float(frame_info['PixelSizeUm'])*1000
+            print("Updated pixelsize to: ", self.P['pxlsize'])
     
     
     def estimate_brightess_from_stack(self, stack):
@@ -368,7 +416,7 @@ class MultiplaneProcess:
         average_brightness = np.empty(shape=(z))
         for i in range(z):
             average_brightness[i] = np.mean(stack[i,::2,:,:].squeeze())
-        brightness_factors = [b/np.mean(average_brightness) for b in average_brightness]
+        brightness_factors = [b/np.max(average_brightness) for b in average_brightness]
         b = {i: k for i,k in enumerate(brightness_factors)}
         return b 
     
@@ -447,6 +495,8 @@ class MultiplaneProcess:
             angle_props[cam] = deskew_angle
             if self.P['use_projection'] == 'median':
                 mip = np.median(stack[:,cam,:,:], axis=z_axis) 
+            if self.P['use_projection'] == 'min':
+                mip = np.min(stack[:,cam,:,:], axis=z_axis) 
             else:
                 mip = np.max(stack[:,cam,:,:], axis=z_axis) 
             #mip = skim.filters.gaussian(mip, sigma=5, preserve_range=True)
@@ -455,19 +505,14 @@ class MultiplaneProcess:
 
             if self.log: 
                 plt.ion()
-            '''
-            props = self.threshold_segment(mip, th)
-            reset_counter, iter_limit = 0, 1000
-            fov_size = np.mean([x.area_bbox for x in props])
-            lower_fovsize, upper_fovsize = size_estimate*0.8, size_estimate*1.2
-            '''
+
             print(f"Adaptive thresholding cam {cam}..")
 
 
             # try it with continous erosion and a background estimate as threshold
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
             bkg = np.mean([np.median([mip[:,0].ravel(), mip[:,-1].ravel()]),np.median([mip[0,:].ravel(), mip[-1,:].ravel()])])
-            w=(4,1)
+            w=self.th_weights
             bkg= (bkg*w[0]+th*w[1])/np.sum(w)
             props, mask = self.erode_image(mip, size_estimate, bkg, planes_per_cam)
             
@@ -523,7 +568,7 @@ class MultiplaneProcess:
                         image_crops[fov_idx,t,:,:] = np.flip(np.squeeze(image_crops[fov_idx,t,:,:]), axis=1) # axis change?
 
         if self.log: 
-            fig, ax = plt.subplots(1, n_planes)
+            fig, ax = plt.subplots(1, n_planes, figsize=(n_planes*3, 3))
             for t in range(n_planes):
                 ax[t].imshow(np.median(image_crops[t,:,:,:], axis=0))
                 ax[t].set_title(f'FOV_{t}')
@@ -631,26 +676,7 @@ class MultiplaneProcess:
 
         return image_crops
 
-#     def threshold_segment(self, mip, th):
-#        binary = mip > th
-#        mask = np.logical_and(np.ones(mip.shape), binary > 0).astype(int)
-#        
-#
-#        #morph = skim.morphology.dilation(mask)
-#        # improve segmentation 14/08
-#        morph = skim.morphology.dilation(mask)
-#        morph = skim.morphology.erosion(mask)
-#        morph = skim.morphology.area_opening(morph, area_threshold=32, connectivity=8)
-#        if self.log: 
-#            plt.imshow(morph)
-#            plt.show()
-#  
-#        #segm = skim.segmentation.clear_border(morph)
-#        label_image = skim.measure.label(morph)
-#
-#        return skim.measure.regionprops(label_image)
-#    
-#
+
     def adjust_bbox(self, shape, bbox, bbox_size):
         #assert bbox[2]-bbox[0] <= bbox_size[0] <= shape[0], f"Dimension 0 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
         #assert bbox[3]-bbox[1] <= bbox_size[1] <= shape[1], f"Dimension 1 of bounding box {bbox} out of range for bbox_size {bbox_size} and image shape {shape}"
@@ -827,8 +853,7 @@ class MultiplaneProcess:
             # apply deg rotation and fov cropping
             fovs = self.crop_with_parameters(image, self.cal, n_planes=self.P['nplanes']) 
 
-            fps = np.ones(N_img[0])*(N_img[1]/2)
-            fps = fps.astype(np.uint16)
+
             fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
 
             if self.P['apply_transform']: 
@@ -856,11 +881,18 @@ class MultiplaneProcess:
 
             print(f"Writing data to {self.output_path}")
 
+            clean_file_specifier = file_specifier.replace("MMStack", "mm")
+
             if self.save_individual:
                 for plane in tqdm(range(registered_subimages.shape[0]), desc="Plane"): 
-                    plane_path = os.path.join(self.output_path, str(plane))
-                    makeFolder(plane_path)
-                    tifffile.imwrite(os.path.join(plane_path, f"{file_specifier}_f{idx}_pl{plane}.tif"), registered_subimages[plane], 
+                    # do yhou want to save data of each plane in a different folder?
+                    if self.save_in_subfolders:
+                        plane_path = os.path.join(self.output_path, str(plane))
+                        makeFolder(plane_path)
+                    else: # save all planes in the same folder
+                        plane_path = self.output_path
+
+                    tifffile.imwrite(os.path.join(plane_path, f"{clean_file_specifier}_f{idx}_pl{plane}.tif"), registered_subimages[plane], 
                         metadata={
                             'TimeIncrement': self.P['dt'],
                             'ZSpacing': self.P['dz']
@@ -868,7 +900,7 @@ class MultiplaneProcess:
                     ) 
 
             else:
-                tifffile.imwrite(os.path.join(self.output_path, f"{file_specifier}_f{idx}.ome.tiff"), registered_subimages, 
+                tifffile.imwrite(os.path.join(self.output_path, f"{clean_file_specifier}_f{idx}.ome.tif"), registered_subimages, 
                     metadata={
                         'axes': axes,
                         'TimeIncrement': self.P['dt'],
@@ -882,23 +914,23 @@ class MultiplaneProcess:
 #########################################
 
 
-#     def calibrate_sml(self):
-#        from smlm_calibration import smlm_calibration
-#        if self.mcal is None:
-#            markers = None
-#        else:
-#            markers = self.mcal.markers
-#            
-#        self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
-#        cal = self.smlcal.biplane_calibration()
-#        cal['fp'] = [0.0] + [np.sum(self.cal['dz'][:p+1]) for p in range(len(self.cal['dz']))]
-#        cal_outer = {"zcal": cal}
-#        outname = os.path.join(self.path, "zcal.mat")
-#        scp.io.savemat(outname, cal_outer)
-#
-#        return cal_outer
-#
-#
+    def calibrate_sml(self):
+        from smlm_calibration import smlm_calibration
+        if self.mcal is None:
+            markers = None
+        else:
+            markers = self.mcal.markers
+            
+        self.smlcal = smlm_calibration(self.path, markers, self.P["ref_plane"], self.P["dz_stage"], self.P["pxlsize"])
+        cal = self.smlcal.biplane_calibration()
+        cal['fp'] = [0.0] + [np.sum(self.cal['dz'][:p+1]) for p in range(len(self.cal['dz']))]
+        cal_outer = {"zcal": cal}
+        outname = os.path.join(self.path, "zcal.mat")
+        scp.io.savemat(outname, cal_outer)
+
+        return cal_outer
+
+
 #########################################
 #TRANFORMS
 #########################################
@@ -988,55 +1020,55 @@ def jsonKeys2int(x):
     return x
 
 
-# def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
-#    """
-#    Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
-#    
-#    :param folder_path: Path to the folder containing TIFF files.
-#    :param batch_size: Number of frames to read in each batch.
-#    :param n_cams: Number of channels (e.g., cameras) for each frame.
-#    :param file_extension: File extension for TIFF files, default is 'tif'.
-#    :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
-#    """
-#    # Get all TIFF files in the folder
-#    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-#    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-#    
-#    current_batch = []  # To store images for the current batch
-#    
-#    # Iterate through each TIFF file
-#    for tiff_file in tiff_files:
-#        with tifffile.TiffFile(tiff_file) as tif:
-#            total_pages = len(tif.pages)
-#            
-#            # Iterate through pages of the current TIFF file
-#            for i in range(total_pages):
-#                try:
-#                    # Read the current page as a NumPy array (skip reading metadata)
-#                    image = tif.pages[i].asarray()
-#                    current_batch.append(image)
-#                except UnicodeDecodeError:
-#                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
-#
-#                # If the batch size is reached, process and yield the batch
-#                if len(current_batch) == batch_size * n_cams:
-#                    # Reshape into 4D array: (batch_size, n_cams, height, width)
-#                    batch_array = np.array(current_batch)
-#                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
-#                    yield batch_array
-#                    current_batch = []  # Reset the batch after yielding
-#        
-#    # If there are remaining images after all files are processed, yield them as a batch
-#    if current_batch:
-#        remaining_size = len(current_batch) // n_cams
-#
-#        try: 
-#            batch_array = np.array(current_batch)
-#            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-#        except ValueError:
-#            *batch_array, _ = batch_array
-#            batch_array = np.array(current_batch)
-#            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-#        
-#        yield batch_array
-#
+def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
+    """
+    Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
+    
+    :param folder_path: Path to the folder containing TIFF files.
+    :param batch_size: Number of frames to read in each batch.
+    :param n_cams: Number of channels (e.g., cameras) for each frame.
+    :param file_extension: File extension for TIFF files, default is 'tif'.
+    :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
+    """
+    # Get all TIFF files in the folder
+    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
+    
+    current_batch = []  # To store images for the current batch
+    
+    # Iterate through each TIFF file
+    for tiff_file in tiff_files:
+        with tifffile.TiffFile(tiff_file) as tif:
+            total_pages = len(tif.pages)
+            
+            # Iterate through pages of the current TIFF file
+            for i in range(total_pages):
+                try:
+                    # Read the current page as a NumPy array (skip reading metadata)
+                    image = tif.pages[i].asarray()
+                    current_batch.append(image)
+                except UnicodeDecodeError:
+                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
+
+                # If the batch size is reached, process and yield the batch
+                if len(current_batch) == batch_size * n_cams:
+                    # Reshape into 4D array: (batch_size, n_cams, height, width)
+                    batch_array = np.array(current_batch)
+                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
+                    yield batch_array
+                    current_batch = []  # Reset the batch after yielding
+        
+    # If there are remaining images after all files are processed, yield them as a batch
+    if current_batch:
+        remaining_size = len(current_batch) // n_cams
+
+        try: 
+            batch_array = np.array(current_batch)
+            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+        except ValueError:
+            *batch_array, _ = batch_array
+            batch_array = np.array(current_batch)
+            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
+        
+        yield batch_array
+
