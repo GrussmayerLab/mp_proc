@@ -76,7 +76,7 @@ class MultiplaneProcess:
         self.mcal = None # multiplane calibration instance
         self.smlcal = None
         self.markers = {}
-        self.th_weights = (4,1) # weights for background and otsu thresholding in adaptive thresholding
+        self.th_weight = 0.2 # weights for background and otsu thresholding in adaptive thresholding
         self.save_in_subfolders = False # save each plane in a separate subfolder
 
         #self.path = self.select_data_directory()
@@ -512,36 +512,14 @@ class MultiplaneProcess:
             # try it with continous erosion and a background estimate as threshold
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
             bkg = np.mean([np.median([mip[:,0].ravel(), mip[:,-1].ravel()]),np.median([mip[0,:].ravel(), mip[-1,:].ravel()])])
-            w=self.th_weights
-            bkg= (bkg*w[0]+th*w[1])/np.sum(w)
-            props, mask = self.erode_image(mip, size_estimate, bkg, planes_per_cam)
             
-            '''
-            while len(props) != planes_per_cam or not lower_fovsize < fov_size < upper_fovsize:
-
-                if iter_limit == reset_counter or th < 0 or th > max_val: 
-                    th = np.quantile(mip.ravel(), np.random.rand(1))
-                    print(f"cant find proper fovs after {reset_counter} iterations , resetting thresholding to random starting point")
-                    reset_counter=0
-
-                if len(props) > planes_per_cam or fov_size < lower_fovsize:
-                    th += 3
-                #elif len(props) < planes_per_cam:
-                elif len(props) < planes_per_cam or fov_size > lower_fovsize:
-                    th -= 2    
-                reset_counter+=1
-
-                props_nonfilt = self.threshold_segment(mip, th)
-                props = self.filter_fov_size(props_nonfilt, (lower_fovsize, upper_fovsize))
-
-                fov_size = np.mean([x.area_bbox for x in props])
-            '''
-
+            #bkg= (bkg*w[0]+th*w[1])/np.sum(w)
+            th_combined = bkg + self.th_weight * (th-bkg)
+            props, mask = self.erode_image(mip, size_estimate, th_combined, planes_per_cam)
 
             if self.log:
                 plt.imshow(mask)
                 plt.show()
-
 
             for idx, p in enumerate(props):
                 fov_props[cam][idx] = list(p.bbox)
