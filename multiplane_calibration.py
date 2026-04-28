@@ -86,6 +86,7 @@ class MultiplaneCalibration:
         self.full_transform = {} # full transformation object for each plane
         self.transform = {} # affine transformation matrix for each plane
         self.transform_error = {}
+        self.max_locs = 100
         #processing parameters
         self.pp = {'gauss_sigma': 1.5, # sigma for DoG gaussian kernel
                    'roi' : 7, # roi radius around peak, to delete locs near edges 
@@ -96,7 +97,7 @@ class MultiplaneCalibration:
                    'max_size': 500.0, # max size for quad finding in distance trees
                    'tolerance': 0.01,  # tolerance for quad acceptance
                     'max_neighbours' : 5,  #distance tree neighbours, was == 10
-                    'k' : 6} # number of neighbours to consider for quad finding
+                    'k' : 4} # number of neighbours to consider for quad finding
 
 
 #     def setlog(self, log=bool):
@@ -175,8 +176,14 @@ class MultiplaneCalibration:
         # find local peaks, use situational threshold
         # clean up locs from the edges 
         th = np.std(mip_filt)*2 # minval local max
-        
         locs = feature.peak_local_max(mip_filt, min_distance=7, threshold_abs = th)
+
+        if len(locs) > self.max_locs:
+            while len(locs) > self.max_locs:
+                th *= 1.1
+                locs = feature.peak_local_max(mip_filt, min_distance=7, threshold_abs = th)
+                print(f"Found {len(locs)} candidate positions in projection, which is above the maximum of {self.max_locs}. Consider adjusting the processing parameters to reduce this number for better performance.")
+            
     
         # consolidate by removing locs from the borders
         markForDeletion = []
@@ -475,34 +482,6 @@ class MultiplaneCalibration:
 
         return pos_o.astype(int)
     
-
-
-#     def get_transformation(self, stack, refplane):
-#        # determine affine transformation between planes
-#        planes = self.pp['planes']
-#        self.refplane = refplane
-#        
-#        # if markers are empty, find them first
-#        outer = tqdm(total=planes, desc='Finding markers', position=0)
-#
-#        for p in range(planes):
-#            self.markers[p]= self.find_markers(stack[p,...], self.beadID[p], p)
-#            outer.update(1)
-#
-#        # calculate tranformation
-#        outer = tqdm(total=planes, desc='Calculating transform')
-#        transform_error = {}
-#        for p in range(planes):
-#            self.transform[p], self.markers[p], transform_error[p] = self.calculate_transform(ref=self.markers[refplane], tar=self.markers[p])
-#            outer.update(1)
-#
-#            self.transform_error[p] = {}
-#            self.transform_error[p]['mean'] = np.mean(transform_error[p])
-#            self.transform_error[p]['std'] = np.std(transform_error[p])
-#            self.transform_error[p]['marker_count'] = len(transform_error[p])
-#            print(f"Plane {p}: Pixel2pixel_error: {self.transform_error[p]['mean']:.4f} +-: {self.transform_error[p]['std']:.4f}, with Pixel2pixel_error: {self.transform_error[p]['marker_count']} markers")
-#
-#        return self.transform, self.transform_error, self.markers
 #
     def match_markers(self, ref, tar):
         # match keypoints of target plane to reference plane
@@ -527,56 +506,24 @@ class MultiplaneCalibration:
         outer = tqdm(total=planes-1, desc='Applying transform', position=0)
         for p, pt in zip(range(1,planes),transform.values()):
             inner = tqdm(total=h, desc='Slice', position=0)
-                        # convert json ecnoded list to numpy array if needed
+            # convert json ecnoded list to numpy array if needed
             if isinstance(pt, list):
                 pt = np.array(pt)
+
+            # transpose to fit row, column convention of affine transform
+            pt = pt.T
+            # inverse matrix
+            pt = np.linalg.inv(pt)    
             for t in range(h):
                 # Transform a single image using the affine transformation matrix
-                #stack[p,t,...] = ndimage.affine_transform(stack[p,t,...], pt[:, :2], offset=pt[:, 2])
                 stack[p,t,...] = ndimage.affine_transform(np.squeeze(stack[p,t,...]), pt[:2, :2], offset=pt[:2, 2])
+                #stack[p,t,...] = ndimage.affine_transform(np.squeeze(stack[p,t,...]), pt[:2, :2])
                 inner.update(1)
                 
             outer.update(1)
 
         return stack
     
-    '''
-    def calculate_transform(self, ref, tar):
-        # ensure ref & tar are of equal length and shorten if not
-        pretranslate = self.pretranslate
-        if pretranslate:            
-            if ref.shape > tar.shape:
-                ref = self.remove_outliers(ref)
-            elif ref.shape < tar.shape:
-                tar = self.remove_outliers(tar)
-
-            ref, tar, tt = self.pre_translate_markers(ref, tar) # tt =(tx,ty) shifts 
-
-        ref_match, tar_match = self.match_markers(ref, tar)
-
-        affine_matrix, mask = cv2.estimateAffine2D(ref_match, tar_match)
-        if pretranslate:
-            affine_matrix[0,2] += tt[0]
-            affine_matrix[1,2] += tt[1]
-
-        
-
-        tar_match = self.apply_affine_transform_2points(tar_match, affine_matrix)
-        plt.figure()
-        plt.scatter(tar[:,0], tar[:,1], color='r', marker="o", alpha=0.3)
-        plt.scatter(ref[:,0], ref[:,1], color="black", marker="o", alpha=0.3)
-
-        plt.scatter(tar_match[:,0], tar_match[:,1], color='r', marker='+')
-        plt.scatter(ref_match[:,0], ref_match[:,1], color="black", marker='+')
-        plt.legend(["target", "reference", "warped target", "matched reference"])
-        plt.show()
-
-        error_xy = ref_match-tar_match
-        error_all = [np.sqrt((cc[0]**2) + (cc[1]**2)) for cc in error_xy]
-        
-        return affine_matrix, tar_match, error_all
-    
-    '''
 
     def apply_affine_transform_2points(self, points, transform_matrix):
         """
@@ -598,31 +545,7 @@ class MultiplaneCalibration:
         
         return transformed_points
     
-#     def remove_outliers(self, data, lower_percentile=5, upper_percentile=95):
-#        """
-#        Removes outliers from a 2D array using percentile-based filtering.
-#        
-#        Parameters:
-#        - data (np.ndarray): A 2D numpy array of numerical values.
-#        - lower_percentile (float): The lower percentile threshold. Values below this percentile will be considered outliers.
-#        - upper_percentile (float): The upper percentile threshold. Values above this percentile will be considered outliers.
-#        
-#        Returns:
-#        - np.ndarray: A 2D numpy array with outliers removed.
-#        """
-#        mask = np.ones(data.shape[0], dtype=bool)
-#        for i in range(data.shape[1]):
-#            # Calculate the specified percentiles
-#            lower_bound = np.percentile(data[:,i], lower_percentile)
-#            upper_bound = np.percentile(data[:,i], upper_percentile)
-#            
-#            # Create a mask for values within the bounds
-#            mask = mask & (data[:,i] >= lower_bound) & (data[:,i] <= upper_bound)
-#        # Set outliers to NaN or remove them (depending on your needs)
-#        cleaned_data = data[mask,:]  # Use np.nan for missing data representation
-#        return cleaned_data  # Returning both for flexibility
-#
-#
+
     def find_markers(self, stack, id, plane=None):
         # localise candidates from MIP stack
         assert len(stack.shape)==3, "stack has wrong dimensions"
@@ -728,7 +651,7 @@ class MultiplaneCalibration:
             transform_error_estimate[p], self.full_transform[p], self.transform[p], self.quad_match[p] = self.estimate_affine_via_quads(self.markers[refplane], self.markers[p], k=self.pp['k'])
             outer.update(1)
 
-        self.visualise_transform(self.transform, self.quad_match, show_rmse=True, title='Quad-based Affine Transformations')  
+        fig = self.visualise_transform(self.transform, self.quad_match, show_rmse=True, title='Quad-based Affine Transformations')  
 
         self.transform_error = transform_error_estimate
 
@@ -745,7 +668,7 @@ class MultiplaneCalibration:
                 
                 
             
-        return self.transform, self.transform_error, self.markers, self.scaling_factor
+        return self.transform, self.transform_error, self.markers, self.scaling_factor, fig
 
 
 
@@ -805,8 +728,7 @@ class MultiplaneCalibration:
         plt.tight_layout()
         plt.show()
 
-
-
+        return [fig]
 
     
     from scipy.spatial import cKDTree

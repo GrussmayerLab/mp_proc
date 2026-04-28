@@ -48,8 +48,8 @@ class MultiplaneProcess:
     P['dpixel']=7 # remove pixels from frame to remove registration artifacts
     P['order_default']= [2,3,0,1] # default order of planes after cropping
     P['flip_cam'] = [False, True] # bool, whether to flip the camera data (assuming there are 2 cameras)
-    P['flip_axis'] = 2 # axis along which planes are mirrored
-    P['padding'] = -40 # pixels for padding of found FOV
+    P['flip_axis'] = -1 # axis along which planes are mirrored, was 2
+    P['padding'] = -20 # pixels for padding of found FOV
     P['use_projection'] = 'median' # projection type to use for registration, (median, max, min
     P['ref_plane'] = 2 # reference plane to which  affine transform is determined 
     P['apply_transform'] = True # apply the affine transform before saving data
@@ -70,7 +70,7 @@ class MultiplaneProcess:
         self.meta = {}
         self.cal = {}
         self.is_bead = False
-        self.i_corr = True
+        self.i_corr = False
         self.save_individual = False
         self.deskew_cam = True
         self.mcal = None # multiplane calibration instance
@@ -78,6 +78,7 @@ class MultiplaneProcess:
         self.markers = {}
         self.th_weight = 0.2 # weights for background and otsu thresholding in adaptive thresholding
         self.save_in_subfolders = False # save each plane in a separate subfolder
+
 
         #self.path = self.select_data_directory()
 
@@ -88,7 +89,7 @@ class MultiplaneProcess:
         if path is not None: 
             self.path = path   
 
-        if self.path is None or not os.path.exists(self.path):
+        if path is None or not os.path.exists(self.path):
             root = Tk()
             root.withdraw()
             self.path = filedialog.askdirectory(title='select data directory')
@@ -128,7 +129,7 @@ class MultiplaneProcess:
         if not bool(self.cal): 
             print(f"Calibration file is empty")
         
-        validate_keys = ['fovs', 'brightness', 'dz', 'transform', 'order', 'deg']
+        validate_keys = ['fovs', 'brightness', 'dz', 'transform', 'order', 'deg', 'mirror', 'global_roi']
         missing_keys = []        
         for k in validate_keys: 
             if k not in self.cal.keys():
@@ -162,13 +163,14 @@ class MultiplaneProcess:
         # if not is_bead: is only approximation but better than nothing
         self.is_bead = is_bead
         self.i_corr = i_corr
+        self.create_cal_path()
         # load first dataset (4gb chunk)
         
         # check whether filelist has been filled 
         if not self.filenames:
             self.get_files_with_metadata()
         try:
-            image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_mmstack=False, is_imagej=False)
+            image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=True, is_mmstack=True, is_imagej=False)
         except:
             image = tifffile.imread(os.path.join(self.path, self.filenames[0]), is_ome=False, is_imagej=False)
         print(f"Read image {self.filenames[0]}; size {image.shape}; type {image.dtype}")
@@ -191,6 +193,12 @@ class MultiplaneProcess:
         self.cal['pxlsize'] = self.P['pxlsize']
         self.cal['ncams'] = self.P['ncams']
         self.cal['fname'] = self.filenames[0]
+        self.cal['mirror'] =  np.array([np.repeat(c, repeats=self.P['nplanes']//self.P['ncams']) for c in self.P['flip_cam']]).flatten().tolist() # list of bools whether to flip each plane, based on camera and number of planes per camera
+
+        if 'dt' not in self.P.keys():
+            self.P['dt'] = 30 # default exposure time in ms
+        else:
+            self.cal['dt']= self.P['dt']  
 
         # get global ROI from metadata or insert dummy ROI
         self.cal[f'global_roi']={}
@@ -199,13 +207,14 @@ class MultiplaneProcess:
                 self.cal['global_roi'][i] = [0,0,100,100]
                 print(f"Inserting dummy global ROI {self.cal['global_roi'][i]}, please set parameters in final file")
             else:    
+                # if i > 0: 
+                #     self.cal['global_roi'][i] = [0,0,100,100]
+                # else: 
                 self.cal['global_roi'][i] = self.P['global_roi'] ## currently only one ROI available, still to be fixed from camera metadata maybe? 
                 print(f"Using global ROI {self.cal['global_roi'][i]} from parameters, might be erroneous due to missing metadata")
 
         # find bbox and skew angle
         fovs, self.cal['fovs'], self.cal['deg'] = self.adaptiveThreshold(image, n_planes=self.P['nplanes']) 
-
-        #file_convert = fovs.astype(np.uint16)
 
         if is_bead: 
             # figure out plane order otherwise take default order
@@ -221,31 +230,36 @@ class MultiplaneProcess:
         fps = np.ones(N_img[0])*(N_img[1]/2)
         fps = fps.astype(np.uint16)
 
+        # reordering 
+        fovs = fovs[self.cal['order'],:,:,:]
+        self.cal['mirror'] = [self.cal['mirror'][i] for i in self.cal['order']]
+
         if 'brightness' not in self.cal.keys():
-            self.cal['brightness'] = self.estimate_brightess_from_stack(fovs[self.cal['order'],:,:,:]) 
+            self.cal['brightness'] = self.estimate_brightess_from_stack(fovs) 
 
         if self.i_corr:
-            fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
+            fovs = self.apply_brightness_correction(fovs) 
 
-        if 'transform' not in self.cal.keys():
-            if is_bead:
-                self.mcal.pretranslate = self.P['pretranslate']
-                self.cal['transform'], self.cal['transform_error_rmse'], self.markers, self.cal['scaling_factor'] = self.mcal.get_affine_transform_via_quads(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
-                #self.cal['transform'], self.cal['transform_error_rmse'], self.markers, self.cal['scaling_factor'] = self.mcal.get_micrometry_transformation(fovs[self.cal['order'],:,:,:], self.P['ref_plane'])
-                #self.mcal.display_transformations()
-                # scale RMSE to pixel size (needs to be per plane// dict format)
-                #self.cal['transform_error_rmse'] = self.cal['transform_error_rmse']*self.P['pxlsize'] 
-            else:
-                self.cal['transform'] = self.get_affine_transform(fovs[self.cal['order'],:,:,:]) 
-            # restructure transform 
-            self.cal['transform'] = self.restructure_transform(self.cal['transform'])
+        #if 'transform' not in self.cal.keys():
+        if is_bead:
+            self.mcal.pretranslate = self.P['pretranslate']
+            self.cal['transform'], self.cal['transform_error_rmse'], self.markers, self.cal['scaling_factor'], transform_fig = self.mcal.get_affine_transform_via_quads(fovs, self.P['ref_plane'])
+            #transform_fig = transform_fig[0]
+            self.write_figure(transform_fig, self.cal_path, "transform_error", '.png')
+        else:
+            self.cal['transform'] = self.get_affine_transform(fovs) 
+        # restructure transform 
+        self.cal['transform'] = self.restructure_transform(self.cal['transform'])
+        #else:
+        #    print("Using existing transform from calibration file")
+            
 
         if self.P['apply_transform']: 
             print("Registration of data...")
             #registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
-            registered_subimages = self.mcal.apply_transformation(fovs[self.cal['order'],:,:,:], self.cal['transform']) 
+            registered_subimages = self.mcal.apply_transformation(fovs, self.cal['transform']) 
         else: 
-            registered_subimages = fovs[self.cal['order'],:,:,:]
+            registered_subimages = fovs
             print("Registration of data...")
         
 
@@ -257,7 +271,7 @@ class MultiplaneProcess:
             axes = 'CTZYX'
 
         ##### OUT PUT FILE WRITING
-        self.create_cal_path()
+        
         
         # first write individual planes to disk
         self.cal['zrange_psf'] = self.P['zrange_psf'] 
@@ -291,7 +305,7 @@ class MultiplaneProcess:
         self.write_calibration()
         self.write_processing()
         self.write_marker_planes(registered_subimages)
-
+            
         return self.cal 
 
 
@@ -345,11 +359,18 @@ class MultiplaneProcess:
 #     def get_plane_order(self, stack):
 #        return stack
 #    
-    def write_calibration(self):        
+    def write_calibration(self, outpath = None):        
         #makeFolder(path)
-        with open(os.path.join(self.path,'cal.json'), 'w') as yaml_file:
-            #yaml.dump(self.cal, yaml_file, default_flow_style=False)
-            json.dump(self.cal, yaml_file, cls=NumpyEncoder)
+        if outpath is not None:
+            with open(os.path.join(outpath,'cal.json'), 'w') as yaml_file:
+                json.dump(self.cal, yaml_file, cls=NumpyEncoder)
+        else:
+            with open(os.path.join(self.path,'cal.json'), 'w') as yaml_file:
+                #yaml.dump(self.cal, yaml_file, default_flow_style=False)
+                json.dump(self.cal, yaml_file, cls=NumpyEncoder)
+
+            with open(os.path.join(self.cal_path,'cal.json'), 'w') as yaml_file:
+                json.dump(self.cal, yaml_file, cls=NumpyEncoder)
 
     # write the focal planes in which the markers are identified to a tiff file
     def write_marker_planes(self, stack):        
@@ -405,9 +426,11 @@ class MultiplaneProcess:
         self.P['global_roi'] = [int(i) for i in roi.split('-')]
         print("Updated global ROI to: ", self.P['global_roi'])
 
-        if 'PixelSizeUm' in frame_info.keys():
-            self.P['pxlsize'] = float(frame_info['PixelSizeUm'])*1000
-            print("Updated pixelsize to: ", self.P['pxlsize'])
+        if 'Exposure-ms' in frame_info.keys():
+            self.P['dt'] = float(frame_info['Exposure-ms'])
+            print("Updated exposure time to: ", self.P['dt'], " ms")
+
+
     
     
     def estimate_brightess_from_stack(self, stack):
@@ -415,8 +438,8 @@ class MultiplaneProcess:
         z, _,_,_ = stack.shape
         average_brightness = np.empty(shape=(z))
         for i in range(z):
-            average_brightness[i] = np.mean(stack[i,::2,:,:].squeeze())
-        brightness_factors = [b/np.max(average_brightness) for b in average_brightness]
+            average_brightness[i] = np.mean(stack[i,:,:,:].squeeze())
+        brightness_factors = [np.max(average_brightness)/b for b in average_brightness]
         b = {i: k for i,k in enumerate(brightness_factors)}
         return b 
     
@@ -457,11 +480,12 @@ class MultiplaneProcess:
         else:
             best_angle = P
 
-        print("Rotating by skew angle...")
+        
         limit = [-0.1, 0.1]
         if limit[0] < best_angle < limit[1]:
             rotated_stack = stack
         else:
+            print("Rotating by skew angle...")
             rotated_stack = self.rotate_stack(stack, best_angle, datatype)
 
         return rotated_stack, best_angle
@@ -499,15 +523,14 @@ class MultiplaneProcess:
                 mip = np.min(stack[:,cam,:,:], axis=z_axis) 
             else:
                 mip = np.max(stack[:,cam,:,:], axis=z_axis) 
-            #mip = skim.filters.gaussian(mip, sigma=5, preserve_range=True)
-            th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
-            max_val= np.max(mip.ravel())
 
             if self.log: 
                 plt.ion()
 
             print(f"Adaptive thresholding cam {cam}..")
 
+
+            #mip = skim.filters.gaussian(mip, sigma=1, preserve_range=True)
 
             # try it with continous erosion and a background estimate as threshold
             th = skim.filters.threshold_otsu(mip.ravel())#np.quantile(mip.ravel(), 0.3)
@@ -543,7 +566,7 @@ class MultiplaneProcess:
                 if flip[cam_idx]:
                     # causes memory issues due to float conversion, do the flipping in place iteratively? 
                     for t in range(image_crops.shape[1]):
-                        image_crops[fov_idx,t,:,:] = np.flip(np.squeeze(image_crops[fov_idx,t,:,:]), axis=1) # axis change?
+                        image_crops[fov_idx,t,:,:] = np.flip(np.squeeze(image_crops[fov_idx,t,:,:]), axis=self.P['flip_axis']) # axis change?
 
         if self.log: 
             fig, ax = plt.subplots(1, n_planes, figsize=(n_planes*3, 3))
@@ -565,8 +588,8 @@ class MultiplaneProcess:
         binary_mask = np.logical_and(np.ones(mip.shape), binary_mask > 0)
         binary_mask = binary_mask.astype(int)
         # Factor for size tolerance
-        size_min = size_estimate * 0.7
-        size_max = size_estimate * 1.3
+        size_min = size_estimate * 0.1
+        size_max = size_estimate * 2 #1.2
         
         # Step 2: Iteratively apply erosion until we get the desired number of targets with the desired size
         iteration = 0
@@ -584,10 +607,11 @@ class MultiplaneProcess:
             regions = skim.measure.regionprops(labeled_mask)
             
             # Filter regions by size
-            if iteration < 10:
-                valid_regions = [r for r in regions if size_min <= r.area_bbox <= size_max]
-            else:
-                valid_regions = [r for r in regions]
+        
+            valid_regions = [r for r in regions if size_min <= r.area_filled <= size_max]
+            #valid_regions = regions 
+            #else:
+            #    valid_regions = [r for r in regions]
             
             # Check if the number of valid regions matches n_planes
             if len(valid_regions) == n_planes:
@@ -630,27 +654,24 @@ class MultiplaneProcess:
     def crop_with_parameters(self, stack, P, n_planes=4, z_axis=0, camera_axis=1):
         flip = self.P['flip_cam'] 
         dim = stack.shape[z_axis]
-        remaining_axis = np.linspace(0, len(stack.shape)-1, len(stack.shape), dtype=int)
-        remaining_axis = np.delete(remaining_axis, [z_axis, camera_axis])
-        Nx, Ny = remaining_axis[0], remaining_axis[1]
         planes_per_cam = int(n_planes/stack.shape[camera_axis])
 
-        fov_props = P["fovs"]
-        f0 = fov_props[0][0]
-        max_width, max_height = f0[2]-f0[0], f0[3]-f0[1]
         if self.deskew_cam:
             for cam in range(stack.shape[camera_axis]):
                 stack[:,cam,:,:], _ = self.upright_images(stack[:,cam,:,:], P["deg"][cam])
 
+        fov_props = P["fovs"]
+        f0 = fov_props[0][0]
+        max_width, max_height = f0[2]-f0[0], f0[3]-f0[1]
         image_crops = np.empty(shape=(n_planes, dim, max_width, max_height))
 
         for cam_idx, cam_props in fov_props.items():
             for planes_idx, planes_bbox in cam_props.items():
                 fov_idx = int(cam_idx*planes_per_cam+planes_idx)
-                image_crops[fov_idx,:,:,:] = np.expand_dims(self.crop_bbox(stack[:,cam_idx,:,:].squeeze(), planes_bbox), axis=0)
+                image_crops[fov_idx,:,:,:] = np.expand_dims(self.crop_bbox(stack[:,cam_idx,:,:], planes_bbox), axis=0)
 
                 if flip[cam_idx]:
-                    image_crops[fov_idx,:,:,:] = np.flip(np.squeeze(image_crops[fov_idx,:,:,:]), axis=self.P['flip_axis'])
+                    image_crops[fov_idx,:,:,:] = np.flip(image_crops[fov_idx,:,:,:], axis=self.P['flip_axis'])
 
         return image_crops
 
@@ -691,80 +712,24 @@ class MultiplaneProcess:
         return bbox
 
     def crop_bbox(self, stack, bb):
-        return stack[:,bb[0]:bb[2], bb[1]:bb[3]]
+        if len(stack.shape) == 2:
+            return stack[bb[0]:bb[2], bb[1]:bb[3]]
+        elif len(stack.shape) == 3:
+            return stack[:,bb[0]:bb[2], bb[1]:bb[3]]
+        elif len(stack.shape) == 4:
+            return stack[:, :, bb[0]:bb[2], bb[1]:bb[3]]
+        else:
+            raise ValueError("Unsupported stack dimensions")
 
-#     def save_yaml(self, stack, path):
-#        for i in range(stack.shape[1]):
-#            params = {}
-#            filename = os.path.join(path, f'Plane_{i}')
-#            params["Plane"] = i
-#            params["directory"] = os.path.join(filename, "")
-#            self.metadata_files[i] = filename
-#            with open(filename + ".yaml", "w") as file:
-#                yaml.dump(params, file)
-#
-#     def save_stack(self, stack):
-#        for i in range(stack.shape[0]):
-#            tifffile.imwrite(self.metadata_files[i] + ".tiff", stack[i])
-#
-#     def get_average_transform_via_xcorr(self, stack, fp):
-#        # stack: z, t, y, x 
-#        # fp: focal planes (int), shape: (z,1)
-#        z, t,_,_ = stack.shape
-#        transforms = np.empty(shape=(z-1, 2))
-#        eval_points = min(t, 5)
-#        eval_points_delta  = np.linspace(max(-int(t/2), -20), min(int(t/2), 20), num=min(eval_points, 7), dtype=int)
-#        upsample = 100
-#        for p in range(z-1): 
-#            #eval_plane = int(np.round(np.mean([fp[p], fp[p+1]])))
-#            #iterate points in bead stack
-#            eval_points_shift = np.empty(shape=(eval_points, 2))
-#            for z_point in range(eval_points):
-#            # pixel level precision first
-#                shift, _,_ = skim.registration.phase_cross_correlation(stack[0,fp[0]+eval_points_delta[z_point],:,:], stack[p+1,fp[p+1]+eval_points_delta[z_point],:,:], upsample_factor=upsample) # evaluate at focal plane
-#                eval_points_shift[z_point] = shift/upsample
-#            transforms[p] = np.mean(eval_points_shift, axis=0)
-#        return transforms
-#
-#
-#     def get_average_transform_via_SIFT(self, stack):
-#        # stack: z, t, y, x 
-#        # fp: focal planes (int), shape: (z,1)
-#        z, t, y, x = stack.shape
-#        transforms = np.empty(shape=(z-1, 256))
-#        descriptor_extractor = skim.feature.SIFT(upsampling=2, c_dog=0.01, sigma_in=0.1) #BRIEF() # SIFT()
-#
-#        mips = np.max(stack, axis=1)  # np.empty(shape=(z,y,x))
-#        descriptors = {}
-#
-#        descriptor_extractor.detect_and_extract(mips[0,...])
-#        #descriptor_extractor.extract(mips[0,...])
-#        #keypoints = descriptor_extractor.keypoints
-#        descriptors[0] = descriptor_extractor.descriptors
-#
-#        for p in range(1, z): 
-#
-#            #iterate projections for their descriptors and match to first plane
-#            descriptor_extractor.detect_and_extract(mips[p,...])
-#            #descriptor_extractor.extract(mips[p,...])
-#            #keypoints = descriptor_extractor.keypoints
-#            descriptors[p] = descriptor_extractor.descriptors
-#            
-#            m = skim.feature.match_descriptors(descriptors[0], descriptors[p], max_ratio=0.6, cross_check=True) # matching indices in descriptor sets
-#            # pixel level precision first
-#            transforms[p] = skim.transform.estimate_transform('affine', descriptors[0][m[:,0]], descriptors[p][m[:,1]])
-#            
-#        return transforms
-#
-#
+
     def transform_stack(self, stack, transform):
         # stack: z, t, y, x 
         # transform:  (z,2) (xy shift vector)
         z, _, _, _ = stack.shape
-        outer = tqdm(total=z-1, desc='Image plane', position=1)
+        #outer = tqdm(total=z-1, desc='Image plane', position=1)
         for ip in range(z-1):
             stack[ip+1,:,:,:] = self.shift_via_fft(stack[ip+1,:,:,:].squeeze(), transform[ip])
-            outer.update(1)
+            #outer.update(1)
         return stack
 
 #     def shift_via_fft(self, stack, transform):
@@ -805,40 +770,72 @@ class MultiplaneProcess:
         for p in range(image.shape[0]):
             image[p,...] = np.divide(image[p,...], self.cal['brightness'][p])
         return image
+    
+    def get_data_properties(self, filename):
+        with tifffile.TiffFile(os.path.join(self.path, filename)) as tif:
+            if tif.is_mmstack:
+                total_pages = np.max((tif.micromanager_metadata['Summary']['Frames'] , tif.micromanager_metadata['Summary']['Slices']))
+            else:
+                total_pages = len(tif.pages)
+            page0 = tif.pages[0]
+            shape = page0.shape
+            dtype = page0.dtype
+        return total_pages, shape, dtype
+
 
     def execute(self):
-        #for self.root, _, self.filenames in os.walk(self.path):
-        #    self.filenames = [os.path.join(self.root, file) for file in self.filenames if file.endswith(tuple(self.file_extensions))]
+        # runs the processing pipeline with an existing calibration file and data file defined before
+
         if not self.filenames:
             self.get_files_with_metadata()
         self.filenames.sort()
         print("Data Directory:", self.path)
 
         self.check_calibration()
-
-        run=True
         filecounter=0
-        idx=0 # batchindex, counter
-        f=0 #framecounter
-        ncams = self.P['ncams']
-
+        idx=0
         file_specifier = get_fileID(self.filenames[filecounter])
-       
-        for image in read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams']):
+        clean_file_specifier = file_specifier.replace("MMStack", "mm")
+
+        # create output path
+        self.create_out_path()
+
+        # write calibration file
+        print(f"Writing calibration to {self.output_path}")
+        self.write_calibration(self.output_path)
+
+        print(f"Writing data to {self.output_path}")
+        if self.P['apply_transform']: 
+            print("Registering data ... yes")
+        else:
+            print("Registering data ... no")
+
+        # get data properties and create update bar
+        tiff_file = natsorted(glob(os.path.join(self.path, f'*{self.file_extensions[0]}*')))[0]
+        total_pages, shape, dtype = self.get_data_properties(os.path.basename(tiff_file))
+        outer_pbar = tqdm(total=total_pages, desc="Slice processed", position=0)
+
+
+
+        for iidx, image in enumerate(read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams'])):
             ### 
-            idx+=1
+            #idx+=1 # when appending, no need to count up
+            outer_pbar.update(self.P['dF_batch'])
             N_img = image.shape 
             # apply deg rotation and fov cropping
-            fovs = self.crop_with_parameters(image, self.cal, n_planes=self.P['nplanes']) 
+            fovs = self.crop_with_parameters(image, self.cal, n_planes=self.cal['nplanes']) 
 
-
-            fovs[self.cal['order'],:,:,:] = self.apply_brightness_correction(fovs[self.cal['order'],:,:,:]) 
+            # switch order to ascending focal planes
+            fovs = fovs[self.cal['order'],:,:,:]
+            
+            if self.i_corr:
+                fovs = self.apply_brightness_correction(fovs) 
 
             if self.P['apply_transform']: 
-                print("Registration of data...")
-                registered_subimages = self.register_image_stack(fovs[self.cal['order'],:,:,:], self.cal['transform'])
+                #print("Registration of data...")
+                registered_subimages = self.register_image_stack(fovs, self.cal['transform'])
             else: 
-                registered_subimages = fovs[self.cal['order'],:,:,:]
+                registered_subimages = fovs
 
             # clean up values outside 16bit tiff range    
             registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
@@ -854,15 +851,13 @@ class MultiplaneProcess:
                 else:
                     axes = 'CTZYX'
 
-            # save stack
-            self.create_out_path()
+            ##### OUT PUT FILE WRITING
 
-            print(f"Writing data to {self.output_path}")
-
-            clean_file_specifier = file_specifier.replace("MMStack", "mm")
-
+            # writing data
+            
             if self.save_individual:
-                for plane in tqdm(range(registered_subimages.shape[0]), desc="Plane"): 
+                #for plane in tqdm(range(registered_subimages.shape[0]), desc="Plane"): 
+                for plane in range(registered_subimages.shape[0]): 
                     # do yhou want to save data of each plane in a different folder?
                     if self.save_in_subfolders:
                         plane_path = os.path.join(self.output_path, str(plane))
@@ -870,21 +865,38 @@ class MultiplaneProcess:
                     else: # save all planes in the same folder
                         plane_path = self.output_path
 
-                    tifffile.imwrite(os.path.join(plane_path, f"{clean_file_specifier}_f{idx}_pl{plane}.tif"), registered_subimages[plane], 
-                        metadata={
-                            'TimeIncrement': self.P['dt'],
-                            'ZSpacing': self.P['dz']
-                        }
-                    ) 
+                    outname = os.path.join(plane_path, f"{clean_file_specifier}_f{idx}_pl{plane}.tif")
+                    # check whether file exists and remove it
+                    if iidx ==0:
+                        if os.path.exists(outname):
+                            os.remove(outname)
+
+                    tifffile.imwrite(outname, 
+                                    registered_subimages[plane], 
+                                    photometric='minisblack',
+                                    metadata={
+                                        'TimeIncrement': self.P['dt'],
+                                        'ZSpacing': self.P['dz']
+                                    }, 
+                                    append=True, 
+                                    bigtiff=True
+                                    ) 
 
             else:
-                tifffile.imwrite(os.path.join(self.output_path, f"{clean_file_specifier}_f{idx}.ome.tif"), registered_subimages, 
-                    metadata={
-                        'axes': axes,
-                        'TimeIncrement': self.P['dt'],
-                        'ZSpacing': self.P['dz']
-                    }
-                ) 
+                outname = os.path.join(self.output_path, f"{clean_file_specifier}_f{idx}.tif")
+                # check whether file exists at first runthrough and remove it
+                if iidx ==0:
+                    if os.path.exists(outname):
+                        os.remove(outname)
+
+                for t in range(registered_subimages.shape[1]):
+                    tifffile.imwrite(outname, 
+                                    registered_subimages[:,t,...], 
+                                    metadata=None, #, {'axes': axes, 'TimeIncrement': self.P['dt'], 'ZSpacing': self.P['dz']}, 
+                                    photometric='minisblack',
+                                    append=True, 
+                                    bigtiff=True
+                    ) 
         print(f"Finished processing {self.path}")
 
 #########################################
@@ -923,37 +935,6 @@ class MultiplaneProcess:
             transforms[p] = self.find_affine_transformation(stack[self.P['ref_plane']], stack[p])
         return transforms
 
-    '''
-    def find_affine_transformation(self, image_stack, reference_stack):
-
-        tar = np.max(image_stack, axis=0)
-        ref = np.max(reference_stack, axis=0)
-
-        
-        # Use ORB to find keypoints and descriptors
-        orb = cv2.ORB_create(scaleFactor=1.2)
-        #orb = cv2.SURF_create()
-        keypoints1, descriptors1 = orb.detectAndCompute(tar.astype(np.uint8), None)
-        keypoints2, descriptors2 = orb.detectAndCompute(ref.astype(np.uint8), None)
-
-        # Use BFMatcher to find matches
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        matches = bf.match(descriptors1, descriptors2)
-
-        # Sort matches by distance
-        matches = sorted(matches, key=lambda x: x.distance)
-
-        # Extract locations of matched keypoints
-        src_pts = np.float32([keypoints1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-        dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-
-        # Find the affine transformation matrix
-        #matrix, mask = cv2.estimateAffine2D(src_pts, dst_pts)
-        matrix= cv2.getAffineTransform(src_pts, dst_pts)
-
-        return matrix
-        '''
-
 
     def apply_affine_transformation(self, matrix, img):
         # Apply the affine transformation
@@ -969,9 +950,11 @@ class MultiplaneProcess:
         # Prepare an array to store transformed images
         #transformed_stack = np.zeros_like(stack)
 
-        for i in tqdm(range(z), desc=" Image plane", position=0):
+        #for i in tqdm(range(z), desc=" Image plane", position=0):
+        for i in range(z):
             # Process each image in the stack
-            for j in tqdm(range(t), desc=" Timepoint", position=1, leave=False):
+            #for j in tqdm(range(t), desc=" Timepoint", position=1, leave=False):
+            for j in range(t):
         
             # Apply the affine transformation
                 transformed_img = self.apply_affine_transformation(matrix[i], stack[i, j,...])
@@ -998,55 +981,113 @@ def jsonKeys2int(x):
     return x
 
 
-def read_tiff_series_batch(folder_path, batch_size=100, n_cams=2, file_extension='tif'):
+from collections import OrderedDict
+
+def read_tiff_series_batch(
+    folder_path,
+    batch_size=1,
+    n_cams=2,
+    file_extension="tif",
+    max_pending=200,
+    on_incomplete="drop",   # "drop" | "pad"
+):
     """
     Read an image series batch-wise from multiple TIFF files in a folder and allocate to a 4D array.
-    
+    Cahces frameskips in the micromanager acquisition when using multiple cameras and drops them
+
     :param folder_path: Path to the folder containing TIFF files.
     :param batch_size: Number of frames to read in each batch.
     :param n_cams: Number of channels (e.g., cameras) for each frame.
     :param file_extension: File extension for TIFF files, default is 'tif'.
     :yield: A 4D NumPy array of shape (batch_size, n_cams, height, width).
+
+
     """
-    # Get all TIFF files in the folder
-    #tiff_files = sorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-    tiff_files = natsorted(glob(os.path.join(folder_path, f'*.{file_extension}')))
-    
-    current_batch = []  # To store images for the current batch
-    
-    # Iterate through each TIFF file
+    tiff_files = natsorted(glob(os.path.join(folder_path, f"*.{file_extension}")))
+    current_batch = []
+
+    # pending[frame_idx] -> list length n_cams (each entry is image or None)
+    pending = OrderedDict()
+    expected_frame = None
+
+    def md_from_page(page):
+        return page.tags[51123].value
+
+    def flush_ready():
+        nonlocal expected_frame, current_batch
+        while expected_frame in pending and all(x is not None for x in pending[expected_frame]):
+            imgs = pending.pop(expected_frame)               # [cam0, cam1, ...]
+            current_batch.extend(imgs)
+            expected_frame += 1
+
     for tiff_file in tiff_files:
         with tifffile.TiffFile(tiff_file) as tif:
-            total_pages = len(tif.pages)
-            
-            # Iterate through pages of the current TIFF file
-            for i in range(total_pages):
-                try:
-                    # Read the current page as a NumPy array (skip reading metadata)
-                    image = tif.pages[i].asarray()
-                    current_batch.append(image)
-                except UnicodeDecodeError:
-                    print(f"UnicodeDecodeError on page {i} of file {tiff_file}, skipping metadata.")
+            is_mm = tif.is_micromanager
 
-                # If the batch size is reached, process and yield the batch
+            for page in tif.pages:
+                img = page.asarray()
+
+                if not is_mm or n_cams <= 1:
+                    current_batch.append(img)
+                else:
+                    md = md_from_page(page)
+                    frame_idx = np.max((md.get("FrameIndex", md.get("Frame", None)), md.get("SliceIndex", None)))
+                    ch_idx = md.get("ChannelIndex", None)
+
+                    if frame_idx is None or ch_idx is None:
+                        # If metadata is missing, either drop or treat as raw stream
+                        # Here: drop to avoid breaking alignment
+                        current_batch.append(img)
+                        continue
+
+                    frame_idx = int(frame_idx)
+                    ch_idx = int(ch_idx)
+
+                    if expected_frame is None:
+                        expected_frame = frame_idx
+
+                    # If ChannelIndex isn't 0..n_cams-1, you can map it (see note below)
+                    if not (0 <= ch_idx < n_cams):
+                        continue
+
+                    slot = pending.setdefault(frame_idx, [None] * n_cams)
+                    slot[ch_idx] = img  # if duplicates occur, last one wins
+
+                    # Bound memory: if too many frames buffered, evict oldest
+                    while len(pending) > max_pending:
+                        old_frame, imgs = pending.popitem(last=False)
+                        if on_incomplete == "pad":
+                            # pad missing channels with zeros
+                            ref = next((x for x in imgs if x is not None), None)
+                            if ref is None:
+                                continue
+                            H, W = ref.shape
+                            padded = [
+                                x if x is not None else np.zeros((H, W), dtype=ref.dtype)
+                                for x in imgs
+                            ]
+                            current_batch.extend(padded)
+                        # else drop incomplete frame
+
+                    flush_ready()
+
+                # yield full batch
                 if len(current_batch) == batch_size * n_cams:
-                    # Reshape into 4D array: (batch_size, n_cams, height, width)
-                    batch_array = np.array(current_batch)
-                    batch_array = batch_array.reshape(batch_size, n_cams, *batch_array.shape[1:])
-                    yield batch_array
-                    current_batch = []  # Reset the batch after yielding
-        
-    # If there are remaining images after all files are processed, yield them as a batch
+                    arr = np.asarray(current_batch)
+                    arr = arr.reshape(batch_size, n_cams, *arr.shape[1:])
+                    yield arr
+                    current_batch = []
+
+    # final flush of any remaining complete frames
+    if expected_frame is not None:
+        while expected_frame in pending and all(x is not None for x in pending[expected_frame]):
+            current_batch.extend(pending.pop(expected_frame))
+            expected_frame += 1
+
+    # yield leftovers (only complete timepoints)
     if current_batch:
         remaining_size = len(current_batch) // n_cams
-
-        try: 
-            batch_array = np.array(current_batch)
-            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-        except ValueError:
-            *batch_array, _ = batch_array
-            batch_array = np.array(current_batch)
-            batch_array = batch_array.reshape(remaining_size, n_cams, *batch_array.shape[1:])
-        
-        yield batch_array
+        arr = np.asarray(current_batch[: remaining_size * n_cams])
+        arr = arr.reshape(remaining_size, n_cams, *arr.shape[1:])
+        yield arr
 
