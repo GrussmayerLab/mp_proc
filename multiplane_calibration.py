@@ -89,15 +89,17 @@ class MultiplaneCalibration:
         self.max_locs = 100
         #processing parameters
         self.pp = {'gauss_sigma': 1.5, # sigma for DoG gaussian kernel
-                   'roi' : 7, # roi radius around peak, to delete locs near edges 
+                   'roi' : 7, # roi radius around peak, to delete locs near edges
                    'frame_min' : 15, # min amount of consecutive frames to consider it a bead trace
-                   'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace 
+                   'd_max' : 5, # maximum distance of locs in consecutive frames to be considered belonging to the same trace
                    'zstep': 10, # default stage zstep size for coregistration nd PSF fitting
-                   'min_size': 5.0, # min size for quad finding in distance trees 
+                   'min_size': 5.0, # min size for quad finding in distance trees
                    'max_size': 500.0, # max size for quad finding in distance trees
                    'tolerance': 0.01,  # tolerance for quad acceptance
                     'max_neighbours' : 5,  #distance tree neighbours, was == 10
-                    'k' : 4} # number of neighbours to consider for quad finding
+                    'k' : 4, # number of neighbours to consider for quad finding
+                    'nn_match_threshold': 50,  # max px distance for nearest-neighbour correspondence
+                    'min_inliers': 4}  # minimum RANSAC inliers required to trust the transform
 
 
 #     def setlog(self, log=bool):
@@ -493,33 +495,34 @@ class MultiplaneCalibration:
 
     def apply_transformation(self, stack, transform):
         assert len(stack.shape) == 4, "Input stack must have 4 dimensions"
-        #assert stack.shape[0]-1 == len(transform.keys()), f"Not enough transformations ({len(transform.keys())}) to apply to stack with {stack.shape[0]} planes"
-        
+
         if 'planes' in self.pp.keys():
             planes = self.pp['planes']
         else:
             planes = stack.shape[0]
-            
+
         h = stack.shape[1]
+        sy, sx = stack.shape[2], stack.shape[3]
+        orig_dtype = stack.dtype
 
-        # apply tranformation iteratively for every slice and plane
-        outer = tqdm(total=planes-1, desc='Applying transform', position=0)
-        for p, pt in zip(range(1,planes),transform.values()):
-            inner = tqdm(total=h, desc='Slice', position=0)
-            # convert json ecnoded list to numpy array if needed
+        outer = tqdm(total=planes - 1, desc='Applying transform', position=0)
+        for p in range(1, planes):
+            pt = transform[p]
             if isinstance(pt, list):
-                pt = np.array(pt)
+                pt = np.array(pt, dtype=np.float32)
+            else:
+                pt = np.asarray(pt, dtype=np.float32)
 
-            # transpose to fit row, column convention of affine transform
-            pt = pt.T
-            # inverse matrix
-            pt = np.linalg.inv(pt)    
             for t in range(h):
-                # Transform a single image using the affine transformation matrix
-                stack[p,t,...] = ndimage.affine_transform(np.squeeze(stack[p,t,...]), pt[:2, :2], offset=pt[:2, 2])
-                #stack[p,t,...] = ndimage.affine_transform(np.squeeze(stack[p,t,...]), pt[:2, :2])
-                inner.update(1)
-                
+                stack[p, t, ...] = cv2.warpAffine(
+                    stack[p, t, ...].astype(np.float32),
+                    pt,
+                    (sx, sy),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                ).astype(orig_dtype)
+
             outer.update(1)
 
         return stack
@@ -620,12 +623,7 @@ class MultiplaneCalibration:
             ax.set_title(f'Plane {p} markers, slice {ffp}', fontsize=12)
         plt.tight_layout()
         plt.show()
-
-
-
-
-
-
+        
 
     #############################################
     # new quad based method, just sample all quad based transforms, then take the best
@@ -699,7 +697,10 @@ class MultiplaneCalibration:
             other = markers[p]['other']
             transform = transform_dict[p]
 
-            transformed = self.apply_affine_transform_2points(other, transform)
+            # M is in (x,y) convention; markers are (row,col)=(y,x) → flip before applying
+            other_xy = other[:, ::-1].astype(np.float32)
+            transformed_xy = self.apply_affine_transform_2points(other_xy, transform)
+            transformed = transformed_xy[:, ::-1]  # back to (row, col) for display
             rmse = np.sqrt(np.mean(np.sum((transformed - ref) ** 2, axis=1)))
 
             
@@ -734,35 +735,80 @@ class MultiplaneCalibration:
     from scipy.spatial import cKDTree
 
     def estimate_affine_via_quads(self, src, dst, k=4):
-        src_tree = cKDTree(src)
-        dst_tree = cKDTree(dst)
-        idx_src = src_tree.query(src, k=k)[1]
-        idx_dst = dst_tree.query(dst, k=k)[1]
-        
-        best_error = float('inf')
-        best_tf = None
+        """
+        Estimate a constrained similarity transform (tx, ty, rotation, uniform scale)
+        between two sets of marker positions.
 
-        for i in range(len(idx_src)):
-            for j in range(len(idx_dst)):
-                #try:
-                    quad_src = src[idx_src[i]]
-                    quad_dst = dst[idx_dst[j]]
-                    if len(quad_src) >= 3 and len(quad_dst) >= 3:
-                    
-                        tf = estimate_transform('affine', quad_dst, quad_src)
-                        transformed = tf(quad_src)
-                        error =  np.sqrt(np.mean(np.sum((transformed - quad_dst) ** 2, axis=1))) # np.sqrt(np.mean((transformed - quad_dst)**2)) 
-                        if error < best_error:
-                            best_error = error
-                            best_tf = tf
-                            best_quad_index_src = i
-                            best_quad_index_dst = j
-                #except Exception:
-                #    if self.log:
-                #        print(f"Skipping quad {i} evaluation for transform, weird indexing error.")
-                #    continue
+        Strategy:
+        1. Build candidate correspondences via 1-nearest-neighbour matching in pixel
+           space. This is valid because inter-plane lateral offsets are small relative
+           to bead spacing. Points with no neighbour within nn_match_threshold are
+           discarded before RANSAC, avoiding the garbage-in problem of passing
+           unmatched index-paired arrays to estimateAffinePartial2D.
+        2. Run RANSAC on the matched pairs to fit a 4-DOF similarity transform and
+           identify inliers.
+        3. Require at least min_inliers inliers; fall back to identity if not met.
 
-        return best_error, best_tf, best_tf.params[:2, :], {'ref' : src[idx_src[best_quad_index_src]], 'other' :dst[idx_dst[best_quad_index_dst]]}
+        k is kept for API compatibility but is unused.
+        """
+        nn_thresh  = self.pp.get('nn_match_threshold', 50)
+        min_inliers = self.pp.get('min_inliers', 4)
+
+        # (row, col) → (x, y) for OpenCV
+        src_xy = src[:, ::-1].astype(np.float32)
+        dst_xy = dst[:, ::-1].astype(np.float32)
+
+        # --- Step 1: nearest-neighbour correspondence ---
+        src_tree = cKDTree(src_xy)
+        nn_dists, nn_idxs = src_tree.query(dst_xy, k=1)
+        match_mask = nn_dists < nn_thresh
+        n_matched = int(match_mask.sum())
+
+        identity = np.eye(2, 3, dtype=np.float32)
+
+        if n_matched < min_inliers:
+            print(f"[estimate_affine_via_quads] Only {n_matched} candidate correspondences "
+                  f"within {nn_thresh} px (need {min_inliers}) — returning identity.")
+            tf = AffineTransform(matrix=np.eye(3))
+            return float('inf'), tf, identity, {'ref': src, 'other': dst}
+
+        matched_dst = dst_xy[match_mask]
+        matched_src = src_xy[nn_idxs[match_mask]]
+
+        # --- Step 2: RANSAC similarity fit ---
+        M, inliers = cv2.estimateAffinePartial2D(
+            matched_dst, matched_src,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=2.0,
+            maxIters=2000,
+            confidence=0.99,
+        )
+
+        # --- Step 3: validate inlier count ---
+        n_inliers = int(inliers.sum()) if inliers is not None else 0
+        if M is None or n_inliers < min_inliers:
+            print(f"[estimate_affine_via_quads] RANSAC found only {n_inliers} inliers "
+                  f"(need {min_inliers}) — returning identity.")
+            tf = AffineTransform(matrix=np.eye(3))
+            return float('inf'), tf, identity, {'ref': src, 'other': dst}
+
+        inlier_mask = inliers.ravel().astype(bool)
+        dst_h = np.hstack([matched_dst[inlier_mask],
+                           np.ones((n_inliers, 1), dtype=np.float32)])
+        projected = (M @ dst_h.T).T
+        rmse = float(np.sqrt(np.mean(np.sum((projected - matched_src[inlier_mask]) ** 2, axis=1))))
+
+        # Return matched points in original (row, col) for downstream visualisation
+        orig_idxs = np.where(match_mask)[0][inlier_mask]
+        matched = {
+            'ref':   src[nn_idxs[match_mask][inlier_mask]],
+            'other': dst[orig_idxs],
+        }
+
+        M_full = np.vstack([M, [0, 0, 1]]).astype(np.float64)
+        tf = AffineTransform(matrix=M_full)
+
+        return rmse, tf, M, matched
 
 
 #    
