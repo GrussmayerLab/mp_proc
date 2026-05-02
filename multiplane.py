@@ -1,4 +1,5 @@
-import skimage as skim 
+import re
+import skimage as skim
 import scipy as scp
 import numpy as np
 import os
@@ -786,11 +787,10 @@ class MultiplaneProcess:
 
         if not self.filenames:
             self.get_files_with_metadata()
-        self.filenames.sort()
         print("Data Directory:", self.path)
 
         self.check_calibration()
-        
+
         # create output path
         self.create_out_path()
 
@@ -799,107 +799,92 @@ class MultiplaneProcess:
         self.write_calibration(self.output_path)
 
         print(f"Writing data to {self.output_path}")
-        if self.P['apply_transform']: 
+        if self.P['apply_transform']:
             print("Registering data ... yes")
         else:
             print("Registering data ... no")
 
-        for filecounter, file in enumerate(self.filenames):
+        # Group files by position identifier (Pos0, Pos1, ...).
+        # Files sharing the same PosN key (e.g. Pos0.ome.tif and Pos0_1.ome.tif)
+        # are continuations of one timeseries and are streamed as a single stack.
+        # Files with distinct PosN keys are separate positions and are processed independently.
+        pos_groups = {}
+        for f in natsorted(self.filenames):
+            pos_groups.setdefault(_pos_key(f), []).append(os.path.join(self.path, f))
 
-            #filecounter=0
-            idx=0
-            file_specifier = get_fileID(self.filenames[filecounter])
-            clean_file_specifier = file_specifier.replace("MMStack", "mm")
+        for pos_key, file_list in pos_groups.items():
+            clean_file_specifier = get_fileID(os.path.basename(file_list[0])).replace("MMStack", "mm")
+            print(f"Processing position {pos_key}: {[os.path.basename(f) for f in file_list]}")
 
             # get data properties and create update bar
-            tiff_file = natsorted(glob(os.path.join(self.path, f'*{self.file_extensions[0]}*')))[0]
-            total_pages, shape, dtype = self.get_data_properties(os.path.basename(tiff_file))
-            outer_pbar = tqdm(total=total_pages, desc="Slice processed", position=0)
+            total_pages, _, _ = self.get_data_properties(os.path.basename(file_list[0]))
+            outer_pbar = tqdm(total=total_pages, desc=f"{pos_key} slices processed", position=0)
 
-            for iidx, image in enumerate(read_tiff_series_batch(self.path, batch_size=self.P['dF_batch'], n_cams=self.P['ncams'])):
-                ### 
-                #idx+=1 # when appending, no need to count up
+            idx = 0
+            for iidx, image in enumerate(read_tiff_series_batch(file_list, batch_size=self.P['dF_batch'], n_cams=self.P['ncams'])):
                 outer_pbar.update(self.P['dF_batch'])
-                N_img = image.shape 
                 # apply deg rotation and fov cropping
-                fovs = self.crop_with_parameters(image, self.cal, n_planes=self.cal['nplanes']) 
+                fovs = self.crop_with_parameters(image, self.cal, n_planes=self.cal['nplanes'])
 
                 # switch order to ascending focal planes
                 fovs = fovs[self.cal['order'],:,:,:]
-                
-                if self.i_corr:
-                    fovs = self.apply_brightness_correction(fovs) 
 
-                if self.P['apply_transform']: 
-                    #print("Registration of data...")
+                if self.i_corr:
+                    fovs = self.apply_brightness_correction(fovs)
+
+                if self.P['apply_transform']:
                     registered_subimages = self.register_image_stack(fovs, self.cal['transform'])
-                else: 
+                else:
                     registered_subimages = fovs
 
-                # clean up values outside 16bit tiff range    
+                # clean up values outside 16bit tiff range
                 registered_subimages = np.clip(registered_subimages, 0, 2**16-1).astype(np.uint16)
-                # if len(registered_subimages.shape) == 4:
-                #     if self.save_individual:
-                #         axes = 'TYX'           
-                #     else:
-                #         axes = 'ZTYX'
-                # else:
-                #     # axes = 'ZCTYX
-                #     if self.save_individual:
-                #         axes = 'CTYX'       
-                #     else:
-                #         axes = 'CTZYX'
 
                 ##### OUT PUT FILE WRITING
 
                 if self.save_individual:
-                    #for plane in tqdm(range(registered_subimages.shape[0]), desc="Plane"): 
-                    for plane in range(registered_subimages.shape[0]): 
-                        # do yhou want to save data of each plane in a different folder?
+                    for plane in range(registered_subimages.shape[0]):
                         if self.save_in_subfolders:
                             plane_path = os.path.join(self.output_path, str(plane))
                             makeFolder(plane_path)
-                        else: # save all planes in the same folder
+                        else:
                             plane_path = self.output_path
 
                         outname = os.path.join(plane_path, f"{clean_file_specifier}_f{idx}_pl{plane}.tif")
-                        # check whether file exists and remove it
-                        if iidx ==0:
+                        if iidx == 0:
                             if os.path.exists(outname):
                                 os.remove(outname)
 
-                        tifffile.imwrite(outname, 
-                                        registered_subimages[plane], 
+                        tifffile.imwrite(outname,
+                                        registered_subimages[plane],
                                         photometric='minisblack',
                                         metadata={
                                             'TimeIncrement': self.P['dt'],
-                                            'ZSpacing': self.P['dz'] 
-                                        }, 
-                                        append=True, 
+                                            'ZSpacing': self.P['dz']
+                                        },
+                                        append=True,
                                         bigtiff=True
-                                        ) 
+                                        )
 
                 else:
                     outname = os.path.join(self.output_path, f"{clean_file_specifier}_f{idx}.tif")
-                    # check whether file exists at first runthrough and remove it
-                    if iidx ==0:
+                    if iidx == 0:
                         if os.path.exists(outname):
                             os.remove(outname)
 
                     for t in range(registered_subimages.shape[1]):
-                        tifffile.imwrite(outname, 
-                                        registered_subimages[:,t,...], 
-                                        metadata=None, #, {'axes': axes, 'TimeIncrement': self.P['dt'], 'ZSpacing': self.P['dz']}, 
+                        tifffile.imwrite(outname,
+                                        registered_subimages[:,t,...],
+                                        metadata=None,
                                         photometric='minisblack',
-                                        append=True, 
+                                        append=True,
                                         bigtiff=True
-                        ) 
-            print(f"Finished processing {self.path}")
+                        )
 
+            outer_pbar.close()
+            print(f"Finished {pos_key}")
 
-
-
-
+        print(f"Finished processing {self.path}")
 
 #########################################
 # single molecule localisation calibration
@@ -985,6 +970,10 @@ def jsonKeys2int(x):
 
 from collections import OrderedDict
 
+def _pos_key(filename):
+    m = re.search(r'Pos\d+', os.path.basename(filename))
+    return m.group() if m else 'Pos0'
+
 def read_tiff_series_batch(
     folder_path,
     batch_size=1,
@@ -1005,7 +994,10 @@ def read_tiff_series_batch(
 
 
     """
-    tiff_files = natsorted(glob(os.path.join(folder_path, f"*.{file_extension}")))
+    if isinstance(folder_path, (list, tuple)):
+        tiff_files = natsorted(folder_path)
+    else:
+        tiff_files = natsorted(glob(os.path.join(folder_path, f"*.{file_extension}")))
     current_batch = []
 
     # pending[frame_idx] -> list length n_cams (each entry is image or None)
